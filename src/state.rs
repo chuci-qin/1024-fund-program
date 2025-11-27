@@ -819,6 +819,15 @@ impl InsuranceFundConfig {
         self.total_adl_profit_e6 = self.total_adl_profit_e6.saturating_add(amount_e6);
     }
     
+    /// 添加交易手续费收入 (V1 简化方案: 记入 liquidation_income)
+    /// 
+    /// V1: 手续费直接计入 total_liquidation_income_e6 统一管理
+    /// V2: 可扩展为单独的 total_trading_fee_e6 字段 (使用 reserved bytes)
+    pub fn add_trading_fee(&mut self, fee_e6: i64) {
+        // V1: 简化方案 - 手续费与清算收入一起记账
+        self.total_liquidation_income_e6 = self.total_liquidation_income_e6.saturating_add(fee_e6);
+    }
+    
     /// 更新1小时快照
     pub fn update_hourly_snapshot(&mut self, current_balance_e6: i64, current_ts: i64) {
         self.balance_1h_ago_e6 = current_balance_e6;

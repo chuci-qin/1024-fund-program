@@ -70,6 +70,7 @@ pub fn process_instruction(
         FundInstruction::UpdateHourlySnapshot => process_update_hourly_snapshot(program_id, accounts),
         FundInstruction::SetADLInProgress(args) => process_set_adl_in_progress(program_id, accounts, args),
         FundInstruction::CheckADLTrigger(args) => process_check_adl_trigger(program_id, accounts, args),
+        FundInstruction::AddTradingFee(args) => process_add_trading_fee(program_id, accounts, args),
         FundInstruction::RedeemFromInsuranceFund(args) => process_redeem_from_insurance_fund(program_id, accounts, args),
         
         // Square Platform Operations
@@ -1589,6 +1590,89 @@ fn process_check_adl_trigger(
             msg!("  Result: ⚠️ RAPID DECLINE - Balance dropped >30% in 1 hour");
         }
     }
+    
+    Ok(())
+}
+
+/// Add trading fee income to Insurance Fund (CPI from Ledger)
+/// 
+/// V1 简化方案: 交易手续费直接转入保险基金，简化资金流
+/// 
+/// Accounts:
+/// 0. `[signer]` Caller program (Ledger)
+/// 1. `[writable]` Fund PDA (Insurance Fund)
+/// 2. `[writable]` InsuranceFundConfig PDA
+/// 3. `[writable]` Vault Token Account (source of fees)
+/// 4. `[writable]` Insurance Fund Vault (destination)
+/// 5. `[]` Token Program
+fn process_add_trading_fee(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: AddTradingFeeArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let caller = next_account_info(account_info_iter)?;
+    let fund_account = next_account_info(account_info_iter)?;
+    let insurance_config = next_account_info(account_info_iter)?;
+    let vault_token_account = next_account_info(account_info_iter)?;
+    let insurance_fund_vault = next_account_info(account_info_iter)?;
+    let token_program = next_account_info(account_info_iter)?;
+    
+    assert_owned_by(fund_account, program_id)?;
+    assert_owned_by(insurance_config, program_id)?;
+    
+    // Load and verify InsuranceFundConfig
+    let mut config = InsuranceFundConfig::try_from_slice(&insurance_config.data.borrow())?;
+    if config.discriminator != INSURANCE_FUND_CONFIG_DISCRIMINATOR {
+        return Err(FundError::InsuranceFundNotInitialized.into());
+    }
+    
+    // Verify caller is authorized (Ledger Program)
+    if !config.is_authorized_caller(caller.key) {
+        msg!("Unauthorized caller for AddTradingFee: {}", caller.key);
+        return Err(FundError::UnauthorizedCaller.into());
+    }
+    
+    // Validate fee amount
+    if args.fee_e6 <= 0 {
+        msg!("Invalid fee amount: {}", args.fee_e6);
+        return Err(FundError::InvalidAmount.into());
+    }
+    
+    // Transfer tokens from Vault to Insurance Fund
+    let transfer_ix = spl_token::instruction::transfer(
+        token_program.key,
+        vault_token_account.key,
+        insurance_fund_vault.key,
+        caller.key,  // Ledger program is the authority
+        &[],
+        args.fee_e6 as u64,
+    )?;
+    
+    invoke(
+        &transfer_ix,
+        &[
+            vault_token_account.clone(),
+            insurance_fund_vault.clone(),
+            caller.clone(),
+            token_program.clone(),
+        ],
+    )?;
+    
+    // Update stats
+    config.add_trading_fee(args.fee_e6);
+    config.last_update_ts = get_current_timestamp()?;
+    config.serialize(&mut *insurance_config.data.borrow_mut())?;
+    
+    // Update Fund's realized PnL (fee income is positive PnL for the fund)
+    let mut fund = Fund::try_from_slice(&fund_account.data.borrow())?;
+    fund.record_pnl(args.fee_e6)?;
+    fund.last_update_ts = get_current_timestamp()?;
+    fund.serialize(&mut *fund_account.data.borrow_mut())?;
+    
+    msg!("TRADING_FEE_COLLECTED: fee_e6={}", args.fee_e6);
+    msg!("Total income now: {}", config.total_income_e6());
     
     Ok(())
 }

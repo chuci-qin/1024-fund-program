@@ -236,6 +236,18 @@ pub enum FundInstruction {
     /// 2. `[]` Fund vault PDA
     CheckADLTrigger(CheckADLTriggerArgs),
     
+    /// Add trading fee income to Insurance Fund (CPI from Ledger)
+    /// V1 简化方案: 交易手续费直接转入保险基金
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Caller program (Ledger)
+    /// 1. `[writable]` Fund PDA (Insurance Fund)
+    /// 2. `[writable]` InsuranceFundConfig PDA
+    /// 3. `[writable]` Vault Token Account (source of fees)
+    /// 4. `[writable]` Insurance Fund Vault (destination)
+    /// 5. `[]` Token Program
+    AddTradingFee(AddTradingFeeArgs),
+    
     /// Redeem shares from Insurance Fund (with special rules)
     /// 
     /// Special rules for Insurance Fund LP redemption:
@@ -431,6 +443,13 @@ pub struct SetADLInProgressArgs {
 pub struct CheckADLTriggerArgs {
     /// Shortfall to check against (e6), 0 for no bankruptcy check
     pub shortfall_e6: i64,
+}
+
+/// Arguments for AddTradingFee instruction (CPI)
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct AddTradingFeeArgs {
+    /// Trading fee amount (e6)
+    pub fee_e6: i64,
 }
 
 /// Arguments for RedeemFromInsuranceFund instruction
