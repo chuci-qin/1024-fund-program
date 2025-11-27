@@ -1,0 +1,82 @@
+# =============================================================================
+# Rust / Cargo
+# =============================================================================
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# =============================================================================
+# Solana Program Build Artifacts
+# =============================================================================
+# Compiled program binaries
+*.so
+*.dylib
+*.dll
+
+# Program deploy keypairs (NEVER commit these!)
+deploy-keypair.json
+program-keypair.json
+*-keypair.json
+
+# Solana test validator data
+test-ledger/
+.anchor/
+
+# =============================================================================
+# Keypairs and Secrets (CRITICAL - DO NOT COMMIT)
+# =============================================================================
+# Wallet keypairs
+*.keypair
+id.json
+wallet.json
+authority.json
+admin.json
+payer.json
+
+# Environment files with secrets
+.env
+.env.*
+!.env.example
+
+# =============================================================================
+# IDE / Editor
+# =============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+
+# =============================================================================
+# Operating System
+# =============================================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# =============================================================================
+# Test Artifacts
+# =============================================================================
+*.log
+coverage/
+.coverage
+lcov.info
+test-results/
+
+# =============================================================================
+# Misc
+# =============================================================================
+*.bak
+*.tmp
+*.temp
+.cache/
+node_modules/
+
