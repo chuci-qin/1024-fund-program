@@ -209,6 +209,60 @@ pub enum FundError {
     /// [92] Invalid fee configuration
     #[error("Invalid fee configuration: creator share must be <= 10000 bps")]
     InvalidFeeConfiguration,
+    
+    // === Referral 错误 (100-119) ===
+    
+    /// [100] Referral already initialized
+    #[error("Referral system is already initialized")]
+    ReferralAlreadyInitialized,
+    
+    /// [101] Referral not initialized
+    #[error("Referral system is not initialized")]
+    ReferralNotInitialized,
+    
+    /// [102] Referral link already exists
+    #[error("Referral link already exists for this user")]
+    ReferralLinkAlreadyExists,
+    
+    /// [103] Referral link not found
+    #[error("Referral link not found")]
+    ReferralLinkNotFound,
+    
+    /// [104] Referral link inactive
+    #[error("Referral link is inactive")]
+    ReferralLinkInactive,
+    
+    /// [105] Already bound to referrer
+    #[error("User is already bound to a referrer")]
+    AlreadyBoundToReferrer,
+    
+    /// [106] Cannot refer self
+    #[error("Cannot use your own referral link")]
+    CannotReferSelf,
+    
+    /// [107] Invalid referral code
+    #[error("Invalid referral code: must be 6-12 alphanumeric characters")]
+    InvalidReferralCode,
+    
+    /// [108] Referral code already taken
+    #[error("Referral code is already taken")]
+    ReferralCodeTaken,
+    
+    /// [109] Referral system paused
+    #[error("Referral system is temporarily paused")]
+    ReferralPaused,
+    
+    /// [110] No referral binding
+    #[error("User has no referral binding")]
+    NoReferralBinding,
+    
+    /// [111] Invalid referrer share
+    #[error("Invalid referrer share: must be <= 5000 bps (50%)")]
+    InvalidReferrerShare,
+    
+    /// [112] Invalid referee discount
+    #[error("Invalid referee discount: must be <= 5000 bps (50%)")]
+    InvalidRefereeDiscount,
 }
 
 impl From<FundError> for ProgramError {

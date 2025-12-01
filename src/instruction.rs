@@ -285,6 +285,70 @@ pub enum FundInstruction {
     /// 6. `[]` Token Program
     /// 7. `[]` System Program
     SquarePayment(SquarePaymentArgs),
+    
+    // === Referral Operations (100-119) ===
+    
+    /// Initialize Referral configuration
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Authority (admin)
+    /// 1. `[writable]` ReferralConfig PDA
+    /// 2. `[]` Vault Program
+    /// 3. `[]` System Program
+    InitializeReferral(InitializeReferralArgs),
+    
+    /// Create a referral link
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Referrer
+    /// 1. `[writable]` ReferralLink PDA
+    /// 2. `[writable]` ReferralConfig PDA
+    /// 3. `[]` System Program
+    CreateReferralLink(CreateReferralLinkArgs),
+    
+    /// Bind referral relationship (new user registration)
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Referee (new user)
+    /// 1. `[writable]` ReferralBinding PDA
+    /// 2. `[]` ReferralLink
+    /// 3. `[writable]` ReferralLink (update stats)
+    /// 4. `[writable]` ReferralConfig (update stats)
+    /// 5. `[]` System Program
+    BindReferral,
+    
+    /// Record a referral trade (CPI from Ledger)
+    /// 
+    /// Records the trade and calculates rewards.
+    /// Actual token transfers happen in Ledger/Vault.
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Caller program (Ledger)
+    /// 1. `[]` ReferralConfig
+    /// 2. `[writable]` ReferralBinding
+    /// 3. `[writable]` ReferralLink
+    RecordReferralTrade(RecordReferralTradeArgs),
+    
+    /// Update Referral configuration
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Authority
+    /// 1. `[writable]` ReferralConfig PDA
+    UpdateReferralConfig(UpdateReferralConfigArgs),
+    
+    /// Deactivate a referral link
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Referrer (link owner)
+    /// 1. `[writable]` ReferralLink PDA
+    DeactivateReferralLink,
+    
+    /// Set custom rates for a referral link
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Authority (admin only)
+    /// 1. `[writable]` ReferralLink PDA
+    SetCustomReferralRates(SetCustomReferralRatesArgs),
 }
 
 // === Argument Structs ===
@@ -478,6 +542,63 @@ pub struct SquarePaymentArgs {
     pub subscription_period: u8,
     /// Optional memo (max 32 bytes)
     pub memo: Vec<u8>,
+}
+
+// === Referral Argument Structs ===
+
+/// Arguments for InitializeReferral instruction
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct InitializeReferralArgs {
+    /// Base referrer share in basis points (e.g., 2000 = 20%)
+    pub referrer_share_bps: u16,
+    /// Base referee discount in basis points (e.g., 1000 = 10%)
+    pub referee_discount_bps: u16,
+}
+
+/// Arguments for CreateReferralLink instruction
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct CreateReferralLinkArgs {
+    /// Referral code (6-12 characters)
+    pub code: Vec<u8>,
+}
+
+/// Arguments for RecordReferralTrade instruction (CPI)
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct RecordReferralTradeArgs {
+    /// Trade fee amount (e6)
+    pub trade_fee_e6: i64,
+    /// Trade volume (e6)
+    pub trade_volume_e6: i64,
+    /// Referrer VIP level
+    pub referrer_vip_level: u8,
+    /// Referee VIP level
+    pub referee_vip_level: u8,
+}
+
+/// Arguments for UpdateReferralConfig instruction
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct UpdateReferralConfigArgs {
+    /// New referrer share in basis points (None = no change)
+    pub referrer_share_bps: Option<u16>,
+    /// New referee discount in basis points (None = no change)
+    pub referee_discount_bps: Option<u16>,
+    /// New referrer VIP bonus array (None = no change)
+    pub referrer_vip_bonus_bps: Option<[u16; 6]>,
+    /// New referee VIP bonus array (None = no change)
+    pub referee_vip_bonus_bps: Option<[u16; 6]>,
+    /// New minimum settlement amount (None = no change)
+    pub min_settlement_amount_e6: Option<i64>,
+    /// Pause/unpause (None = no change)
+    pub is_paused: Option<bool>,
+}
+
+/// Arguments for SetCustomReferralRates instruction
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct SetCustomReferralRatesArgs {
+    /// Custom referrer share in basis points (0 = use global)
+    pub custom_referrer_share_bps: u16,
+    /// Custom referee discount in basis points (0 = use global)
+    pub custom_referee_discount_bps: u16,
 }
 
 #[cfg(test)]

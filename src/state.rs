@@ -28,6 +28,15 @@ pub const INSURANCE_FUND_CONFIG_DISCRIMINATOR: u64 = 0x494E5355525F4346; // "INS
 /// Discriminator for SquarePaymentRecord account
 pub const SQUARE_PAYMENT_RECORD_DISCRIMINATOR: u64 = 0x5351555F50415952; // "SQU_PAYR"
 
+/// Discriminator for ReferralConfig account
+pub const REFERRAL_CONFIG_DISCRIMINATOR: u64 = 0x5245465F434F4E46; // "REF_CONF"
+
+/// Discriminator for ReferralLink account
+pub const REFERRAL_LINK_DISCRIMINATOR: u64 = 0x5245465F4C494E4B; // "REF_LINK"
+
+/// Discriminator for ReferralBinding account
+pub const REFERRAL_BINDING_DISCRIMINATOR: u64 = 0x5245465F42494E44; // "REF_BIND"
+
 // === PDA Seeds ===
 
 /// Seed prefix for FundConfig PDA
@@ -50,6 +59,15 @@ pub const INSURANCE_FUND_CONFIG_SEED: &[u8] = b"insurance_fund_config";
 
 /// Seed prefix for SquarePaymentRecord PDA
 pub const SQUARE_PAYMENT_RECORD_SEED: &[u8] = b"square_payment";
+
+/// Seed prefix for ReferralConfig PDA
+pub const REFERRAL_CONFIG_SEED: &[u8] = b"referral_config";
+
+/// Seed prefix for ReferralLink PDA
+pub const REFERRAL_LINK_SEED: &[u8] = b"referral_link";
+
+/// Seed prefix for ReferralBinding PDA
+pub const REFERRAL_BINDING_SEED: &[u8] = b"referral_binding";
 
 // === Fund Config ===
 
@@ -1027,6 +1045,433 @@ impl SquarePaymentRecord {
     }
 }
 
+// =============================================================================
+// Referral System
+// =============================================================================
+
+/// 最大邀请码长度
+pub const MAX_REFERRAL_CODE_LEN: usize = 12;
+
+/// VIP 等级数量
+pub const VIP_LEVELS: usize = 6;
+
+/// 默认邀请人分成 (2000 = 20%)
+pub const DEFAULT_REFERRER_SHARE_BPS: u16 = 2000;
+
+/// 默认被邀请人折扣 (1000 = 10%)
+pub const DEFAULT_REFEREE_DISCOUNT_BPS: u16 = 1000;
+
+/// 全局返佣配置
+/// 
+/// PDA Seeds: ["referral_config"]
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct ReferralConfig {
+    /// 账户类型标识
+    pub discriminator: u64,
+    
+    /// 管理员
+    pub authority: Pubkey,
+    
+    /// Vault Program ID (用于 CPI 转账)
+    pub vault_program: Pubkey,
+    
+    // === 基础分成比例 (basis points, 10000 = 100%) ===
+    
+    /// 邀请人获得手续费的比例 (默认 2000 = 20%)
+    pub referrer_share_bps: u16,
+    
+    /// 被邀请人手续费折扣 (默认 1000 = 10%)
+    pub referee_discount_bps: u16,
+    
+    // === VIP 等级加成 ===
+    
+    /// 邀请人 VIP 等级加成 [VIP0, VIP1, ..., VIP5] bps
+    pub referrer_vip_bonus_bps: [u16; VIP_LEVELS],
+    
+    /// 被邀请人 VIP 等级折扣加成 [VIP0, VIP1, ..., VIP5] bps
+    pub referee_vip_bonus_bps: [u16; VIP_LEVELS],
+    
+    // === 限制 ===
+    
+    /// 最低结算金额 (e6) - 低于此金额累计
+    pub min_settlement_amount_e6: i64,
+    
+    /// 返佣有效期 (秒) - 0 = 永久
+    pub reward_validity_secs: i64,
+    
+    // === 统计 ===
+    
+    /// 总发放返佣金额 (e6)
+    pub total_rewards_paid_e6: i64,
+    
+    /// 总发放折扣金额 (e6)
+    pub total_discounts_given_e6: i64,
+    
+    /// 总注册邀请链接数
+    pub total_referral_links: u64,
+    
+    /// 总邀请用户数
+    pub total_referred_users: u64,
+    
+    /// 总产生交易量 (e6)
+    pub total_referred_volume_e6: i64,
+    
+    // === 状态 ===
+    
+    /// 是否暂停
+    pub is_paused: bool,
+    
+    /// PDA bump
+    pub bump: u8,
+    
+    /// 最后更新时间
+    pub last_update_ts: i64,
+    
+    /// 预留字段
+    pub reserved: [u8; 64],
+}
+
+impl ReferralConfig {
+    /// 账户大小
+    pub const SIZE: usize = 8   // discriminator
+        + 32  // authority
+        + 32  // vault_program
+        + 2   // referrer_share_bps
+        + 2   // referee_discount_bps
+        + 12  // referrer_vip_bonus_bps (6 * 2)
+        + 12  // referee_vip_bonus_bps (6 * 2)
+        + 8   // min_settlement_amount_e6
+        + 8   // reward_validity_secs
+        + 8   // total_rewards_paid_e6
+        + 8   // total_discounts_given_e6
+        + 8   // total_referral_links
+        + 8   // total_referred_users
+        + 8   // total_referred_volume_e6
+        + 1   // is_paused
+        + 1   // bump
+        + 8   // last_update_ts
+        + 64; // reserved
+    
+    /// 创建新的 ReferralConfig
+    pub fn new(
+        authority: Pubkey,
+        vault_program: Pubkey,
+        referrer_share_bps: u16,
+        referee_discount_bps: u16,
+        bump: u8,
+        created_at: i64,
+    ) -> Self {
+        Self {
+            discriminator: REFERRAL_CONFIG_DISCRIMINATOR,
+            authority,
+            vault_program,
+            referrer_share_bps,
+            referee_discount_bps,
+            // 默认 VIP 加成: [0%, 2%, 5%, 10%, 15%, 20%]
+            referrer_vip_bonus_bps: [0, 200, 500, 1000, 1500, 2000],
+            referee_vip_bonus_bps: [0, 200, 500, 1000, 1500, 2000],
+            min_settlement_amount_e6: 10_000_000, // $10 最低结算
+            reward_validity_secs: 0, // 永久有效
+            total_rewards_paid_e6: 0,
+            total_discounts_given_e6: 0,
+            total_referral_links: 0,
+            total_referred_users: 0,
+            total_referred_volume_e6: 0,
+            is_paused: false,
+            bump,
+            last_update_ts: created_at,
+            reserved: [0u8; 64],
+        }
+    }
+    
+    /// PDA seeds
+    pub fn seeds() -> Vec<Vec<u8>> {
+        vec![REFERRAL_CONFIG_SEED.to_vec()]
+    }
+    
+    /// 获取邀请人总分成比例 (基础 + VIP 加成)
+    pub fn get_referrer_share(&self, vip_level: u8) -> u16 {
+        let level = (vip_level as usize).min(VIP_LEVELS - 1);
+        self.referrer_share_bps.saturating_add(self.referrer_vip_bonus_bps[level])
+    }
+    
+    /// 获取被邀请人总折扣比例 (基础 + VIP 加成)
+    pub fn get_referee_discount(&self, vip_level: u8) -> u16 {
+        let level = (vip_level as usize).min(VIP_LEVELS - 1);
+        self.referee_discount_bps.saturating_add(self.referee_vip_bonus_bps[level])
+    }
+    
+    /// 计算返佣金额
+    /// 
+    /// 返回: (referrer_reward, referee_discount, platform_income)
+    pub fn calculate_rewards(
+        &self,
+        trade_fee_e6: i64,
+        referrer_vip: u8,
+        referee_vip: u8,
+    ) -> (i64, i64, i64) {
+        // 取较高的 VIP 等级
+        let effective_vip = referrer_vip.max(referee_vip);
+        
+        // 计算被邀请人折扣
+        let discount_bps = self.get_referee_discount(effective_vip);
+        let referee_discount = (trade_fee_e6 as i128 * discount_bps as i128 / 10000) as i64;
+        
+        // 实际收取的手续费
+        let actual_fee = trade_fee_e6.saturating_sub(referee_discount);
+        
+        // 计算邀请人返佣 (基于实际收取的手续费)
+        let referrer_share_bps = self.get_referrer_share(effective_vip);
+        let referrer_reward = (actual_fee as i128 * referrer_share_bps as i128 / 10000) as i64;
+        
+        // 平台收入
+        let platform_income = actual_fee.saturating_sub(referrer_reward);
+        
+        (referrer_reward, referee_discount, platform_income)
+    }
+    
+    /// 更新统计
+    pub fn record_reward(
+        &mut self,
+        referrer_reward_e6: i64,
+        referee_discount_e6: i64,
+        volume_e6: i64,
+        current_ts: i64,
+    ) {
+        self.total_rewards_paid_e6 = self.total_rewards_paid_e6.saturating_add(referrer_reward_e6);
+        self.total_discounts_given_e6 = self.total_discounts_given_e6.saturating_add(referee_discount_e6);
+        self.total_referred_volume_e6 = self.total_referred_volume_e6.saturating_add(volume_e6);
+        self.last_update_ts = current_ts;
+    }
+}
+
+/// 邀请链接
+/// 
+/// PDA Seeds: ["referral_link", referrer]
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct ReferralLink {
+    /// 账户类型标识
+    pub discriminator: u64,
+    
+    /// 邀请人
+    pub referrer: Pubkey,
+    
+    /// 邀请码 (唯一, 6-12 字符)
+    pub code: [u8; MAX_REFERRAL_CODE_LEN],
+    
+    /// 创建时间
+    pub created_at: i64,
+    
+    /// 是否激活
+    pub is_active: bool,
+    
+    // === 自定义配置 (可选) ===
+    
+    /// 自定义邀请人分成 (0 = 使用全局配置)
+    pub custom_referrer_share_bps: u16,
+    
+    /// 自定义被邀请人折扣 (0 = 使用全局配置)
+    pub custom_referee_discount_bps: u16,
+    
+    // === 统计 ===
+    
+    /// 邀请人数
+    pub referred_count: u32,
+    
+    /// 累计交易量 (被邀请人产生)
+    pub total_volume_e6: i64,
+    
+    /// 累计获得返佣
+    pub total_rewards_earned_e6: i64,
+    
+    /// 累计发放折扣
+    pub total_discounts_given_e6: i64,
+    
+    /// PDA bump
+    pub bump: u8,
+    
+    /// 预留字段
+    pub reserved: [u8; 32],
+}
+
+impl ReferralLink {
+    /// 账户大小
+    pub const SIZE: usize = 8   // discriminator
+        + 32  // referrer
+        + MAX_REFERRAL_CODE_LEN  // code
+        + 8   // created_at
+        + 1   // is_active
+        + 2   // custom_referrer_share_bps
+        + 2   // custom_referee_discount_bps
+        + 4   // referred_count
+        + 8   // total_volume_e6
+        + 8   // total_rewards_earned_e6
+        + 8   // total_discounts_given_e6
+        + 1   // bump
+        + 32; // reserved
+    
+    /// 创建新的邀请链接
+    pub fn new(
+        referrer: Pubkey,
+        code: &[u8],
+        bump: u8,
+        created_at: i64,
+    ) -> Self {
+        let mut code_bytes = [0u8; MAX_REFERRAL_CODE_LEN];
+        let len = code.len().min(MAX_REFERRAL_CODE_LEN);
+        code_bytes[..len].copy_from_slice(&code[..len]);
+        
+        Self {
+            discriminator: REFERRAL_LINK_DISCRIMINATOR,
+            referrer,
+            code: code_bytes,
+            created_at,
+            is_active: true,
+            custom_referrer_share_bps: 0,
+            custom_referee_discount_bps: 0,
+            referred_count: 0,
+            total_volume_e6: 0,
+            total_rewards_earned_e6: 0,
+            total_discounts_given_e6: 0,
+            bump,
+            reserved: [0u8; 32],
+        }
+    }
+    
+    /// PDA seeds
+    pub fn seeds(referrer: &Pubkey) -> Vec<Vec<u8>> {
+        vec![
+            REFERRAL_LINK_SEED.to_vec(),
+            referrer.to_bytes().to_vec(),
+        ]
+    }
+    
+    /// 获取邀请码字符串
+    pub fn code_str(&self) -> String {
+        let end = self.code.iter().position(|&b| b == 0).unwrap_or(self.code.len());
+        String::from_utf8_lossy(&self.code[..end]).to_string()
+    }
+    
+    /// 记录新邀请
+    pub fn record_referral(&mut self) {
+        self.referred_count = self.referred_count.saturating_add(1);
+    }
+    
+    /// 记录返佣
+    pub fn record_reward(&mut self, reward_e6: i64, discount_e6: i64, volume_e6: i64) {
+        self.total_rewards_earned_e6 = self.total_rewards_earned_e6.saturating_add(reward_e6);
+        self.total_discounts_given_e6 = self.total_discounts_given_e6.saturating_add(discount_e6);
+        self.total_volume_e6 = self.total_volume_e6.saturating_add(volume_e6);
+    }
+}
+
+/// 邀请关系绑定
+/// 
+/// PDA Seeds: ["referral_binding", referee]
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct ReferralBinding {
+    /// 账户类型标识
+    pub discriminator: u64,
+    
+    /// 被邀请人
+    pub referee: Pubkey,
+    
+    /// 邀请人
+    pub referrer: Pubkey,
+    
+    /// 邀请链接
+    pub referral_link: Pubkey,
+    
+    /// 绑定时间
+    pub bound_at: i64,
+    
+    // === 统计 ===
+    
+    /// 被邀请人累计交易量 (e6)
+    pub referee_volume_e6: i64,
+    
+    /// 邀请人从此用户获得的返佣 (e6)
+    pub referrer_rewards_e6: i64,
+    
+    /// 被邀请人获得的折扣 (e6)
+    pub referee_discounts_e6: i64,
+    
+    /// 交易次数
+    pub trade_count: u64,
+    
+    /// 最后交易时间
+    pub last_trade_ts: i64,
+    
+    /// PDA bump
+    pub bump: u8,
+    
+    /// 预留字段
+    pub reserved: [u8; 32],
+}
+
+impl ReferralBinding {
+    /// 账户大小
+    pub const SIZE: usize = 8   // discriminator
+        + 32  // referee
+        + 32  // referrer
+        + 32  // referral_link
+        + 8   // bound_at
+        + 8   // referee_volume_e6
+        + 8   // referrer_rewards_e6
+        + 8   // referee_discounts_e6
+        + 8   // trade_count
+        + 8   // last_trade_ts
+        + 1   // bump
+        + 32; // reserved
+    
+    /// 创建新的邀请关系
+    pub fn new(
+        referee: Pubkey,
+        referrer: Pubkey,
+        referral_link: Pubkey,
+        bump: u8,
+        bound_at: i64,
+    ) -> Self {
+        Self {
+            discriminator: REFERRAL_BINDING_DISCRIMINATOR,
+            referee,
+            referrer,
+            referral_link,
+            bound_at,
+            referee_volume_e6: 0,
+            referrer_rewards_e6: 0,
+            referee_discounts_e6: 0,
+            trade_count: 0,
+            last_trade_ts: 0,
+            bump,
+            reserved: [0u8; 32],
+        }
+    }
+    
+    /// PDA seeds
+    pub fn seeds(referee: &Pubkey) -> Vec<Vec<u8>> {
+        vec![
+            REFERRAL_BINDING_SEED.to_vec(),
+            referee.to_bytes().to_vec(),
+        ]
+    }
+    
+    /// 记录交易
+    pub fn record_trade(
+        &mut self,
+        volume_e6: i64,
+        referrer_reward_e6: i64,
+        referee_discount_e6: i64,
+        current_ts: i64,
+    ) {
+        self.referee_volume_e6 = self.referee_volume_e6.saturating_add(volume_e6);
+        self.referrer_rewards_e6 = self.referrer_rewards_e6.saturating_add(referrer_reward_e6);
+        self.referee_discounts_e6 = self.referee_discounts_e6.saturating_add(referee_discount_e6);
+        self.trade_count = self.trade_count.saturating_add(1);
+        self.last_trade_ts = current_ts;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1424,6 +1869,187 @@ mod tests {
         assert_eq!(seeds[1], payer.to_bytes().to_vec());
         assert_eq!(seeds[2], content_id.to_le_bytes().to_vec());
         assert_eq!(seeds[3], timestamp.to_le_bytes().to_vec());
+    }
+
+    // === Referral Config Tests ===
+
+    #[test]
+    fn test_referral_config_size() {
+        assert!(ReferralConfig::SIZE > 0);
+        println!("ReferralConfig SIZE: {}", ReferralConfig::SIZE);
+    }
+
+    #[test]
+    fn test_referral_config_creation() {
+        let authority = Pubkey::new_unique();
+        let vault_program = Pubkey::new_unique();
+        
+        let config = ReferralConfig::new(
+            authority,
+            vault_program,
+            DEFAULT_REFERRER_SHARE_BPS,  // 20%
+            DEFAULT_REFEREE_DISCOUNT_BPS, // 10%
+            254,
+            1700000000,
+        );
+        
+        assert_eq!(config.authority, authority);
+        assert_eq!(config.referrer_share_bps, 2000);
+        assert_eq!(config.referee_discount_bps, 1000);
+        assert!(!config.is_paused);
+        assert_eq!(config.total_referral_links, 0);
+    }
+
+    #[test]
+    fn test_referral_config_vip_bonus() {
+        let authority = Pubkey::new_unique();
+        let vault_program = Pubkey::new_unique();
+        
+        let config = ReferralConfig::new(
+            authority,
+            vault_program,
+            2000, // 20%
+            1000, // 10%
+            254,
+            1700000000,
+        );
+        
+        // VIP 0: 20% base + 0% bonus = 20%
+        assert_eq!(config.get_referrer_share(0), 2000);
+        assert_eq!(config.get_referee_discount(0), 1000);
+        
+        // VIP 3: 20% base + 10% bonus = 30%
+        assert_eq!(config.get_referrer_share(3), 3000);
+        assert_eq!(config.get_referee_discount(3), 2000);
+        
+        // VIP 5: 20% base + 20% bonus = 40%
+        assert_eq!(config.get_referrer_share(5), 4000);
+        assert_eq!(config.get_referee_discount(5), 3000);
+    }
+
+    #[test]
+    fn test_referral_reward_calculation() {
+        let authority = Pubkey::new_unique();
+        let vault_program = Pubkey::new_unique();
+        
+        let config = ReferralConfig::new(
+            authority,
+            vault_program,
+            2000, // 20%
+            1000, // 10%
+            254,
+            1700000000,
+        );
+        
+        // 测试: $100 手续费, VIP 0
+        let (referrer_reward, referee_discount, platform_income) = 
+            config.calculate_rewards(100_000_000, 0, 0);
+        
+        // 被邀请人折扣: $100 * 10% = $10
+        assert_eq!(referee_discount, 10_000_000);
+        // 实际收费: $100 - $10 = $90
+        // 邀请人返佣: $90 * 20% = $18
+        assert_eq!(referrer_reward, 18_000_000);
+        // 平台收入: $90 - $18 = $72
+        assert_eq!(platform_income, 72_000_000);
+        
+        // 测试: $100 手续费, VIP 3 (取较高)
+        let (referrer_reward, referee_discount, platform_income) = 
+            config.calculate_rewards(100_000_000, 3, 1);
+        
+        // VIP 3 折扣: 10% + 10% = 20%
+        // 被邀请人折扣: $100 * 20% = $20
+        assert_eq!(referee_discount, 20_000_000);
+        // 实际收费: $100 - $20 = $80
+        // VIP 3 分成: 20% + 10% = 30%
+        // 邀请人返佣: $80 * 30% = $24
+        assert_eq!(referrer_reward, 24_000_000);
+        // 平台收入: $80 - $24 = $56
+        assert_eq!(platform_income, 56_000_000);
+    }
+
+    // === Referral Link Tests ===
+
+    #[test]
+    fn test_referral_link_size() {
+        assert!(ReferralLink::SIZE > 0);
+        println!("ReferralLink SIZE: {}", ReferralLink::SIZE);
+    }
+
+    #[test]
+    fn test_referral_link_creation() {
+        let referrer = Pubkey::new_unique();
+        let code = b"ALICE2024";
+        
+        let link = ReferralLink::new(referrer, code, 254, 1700000000);
+        
+        assert_eq!(link.referrer, referrer);
+        assert_eq!(link.code_str(), "ALICE2024");
+        assert!(link.is_active);
+        assert_eq!(link.referred_count, 0);
+        assert_eq!(link.total_rewards_earned_e6, 0);
+    }
+
+    #[test]
+    fn test_referral_link_statistics() {
+        let referrer = Pubkey::new_unique();
+        let mut link = ReferralLink::new(referrer, b"TEST123", 254, 1700000000);
+        
+        // 记录新邀请
+        link.record_referral();
+        assert_eq!(link.referred_count, 1);
+        
+        // 记录返佣
+        link.record_reward(18_000_000, 10_000_000, 1000_000_000);
+        assert_eq!(link.total_rewards_earned_e6, 18_000_000);
+        assert_eq!(link.total_discounts_given_e6, 10_000_000);
+        assert_eq!(link.total_volume_e6, 1000_000_000);
+    }
+
+    // === Referral Binding Tests ===
+
+    #[test]
+    fn test_referral_binding_size() {
+        assert!(ReferralBinding::SIZE > 0);
+        println!("ReferralBinding SIZE: {}", ReferralBinding::SIZE);
+    }
+
+    #[test]
+    fn test_referral_binding_creation() {
+        let referee = Pubkey::new_unique();
+        let referrer = Pubkey::new_unique();
+        let link = Pubkey::new_unique();
+        
+        let binding = ReferralBinding::new(referee, referrer, link, 254, 1700000000);
+        
+        assert_eq!(binding.referee, referee);
+        assert_eq!(binding.referrer, referrer);
+        assert_eq!(binding.referral_link, link);
+        assert_eq!(binding.trade_count, 0);
+    }
+
+    #[test]
+    fn test_referral_binding_trade_recording() {
+        let referee = Pubkey::new_unique();
+        let referrer = Pubkey::new_unique();
+        let link = Pubkey::new_unique();
+        
+        let mut binding = ReferralBinding::new(referee, referrer, link, 254, 1700000000);
+        
+        // 记录第一笔交易
+        binding.record_trade(1000_000_000, 18_000_000, 10_000_000, 1700001000);
+        assert_eq!(binding.trade_count, 1);
+        assert_eq!(binding.referee_volume_e6, 1000_000_000);
+        assert_eq!(binding.referrer_rewards_e6, 18_000_000);
+        assert_eq!(binding.referee_discounts_e6, 10_000_000);
+        assert_eq!(binding.last_trade_ts, 1700001000);
+        
+        // 记录第二笔交易
+        binding.record_trade(500_000_000, 9_000_000, 5_000_000, 1700002000);
+        assert_eq!(binding.trade_count, 2);
+        assert_eq!(binding.referee_volume_e6, 1500_000_000);
+        assert_eq!(binding.referrer_rewards_e6, 27_000_000);
+        assert_eq!(binding.referee_discounts_e6, 15_000_000);
     }
 }
 

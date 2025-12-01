@@ -75,6 +75,15 @@ pub fn process_instruction(
         
         // Square Platform Operations
         FundInstruction::SquarePayment(args) => process_square_payment(program_id, accounts, args),
+        
+        // Referral Operations
+        FundInstruction::InitializeReferral(args) => process_initialize_referral(program_id, accounts, args),
+        FundInstruction::CreateReferralLink(args) => process_create_referral_link(program_id, accounts, args),
+        FundInstruction::BindReferral => process_bind_referral(program_id, accounts),
+        FundInstruction::RecordReferralTrade(args) => process_record_referral_trade(program_id, accounts, args),
+        FundInstruction::UpdateReferralConfig(args) => process_update_referral_config(program_id, accounts, args),
+        FundInstruction::DeactivateReferralLink => process_deactivate_referral_link(program_id, accounts),
+        FundInstruction::SetCustomReferralRates(args) => process_set_custom_referral_rates(program_id, accounts, args),
     }
 }
 
@@ -1976,6 +1985,513 @@ fn process_square_payment(
     msg!("  creator_share_bps: {}", args.creator_share_bps);
     msg!("  timestamp: {}", current_ts);
     msg!("  record: {}", payment_record.key);
+    
+    Ok(())
+}
+
+// =============================================================================
+// Referral Operations
+// =============================================================================
+
+/// Initialize the Referral system
+/// 
+/// Creates the global ReferralConfig PDA.
+fn process_initialize_referral(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: InitializeReferralArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let authority = next_account_info(account_info_iter)?;
+    let referral_config = next_account_info(account_info_iter)?;
+    let vault_program = next_account_info(account_info_iter)?;
+    let system_program = next_account_info(account_info_iter)?;
+    
+    // Verify authority is signer
+    assert_signer(authority)?;
+    
+    // Validate share rates
+    if args.referrer_share_bps > 5000 {
+        return Err(FundError::InvalidReferrerShare.into());
+    }
+    if args.referee_discount_bps > 5000 {
+        return Err(FundError::InvalidRefereeDiscount.into());
+    }
+    
+    // Derive ReferralConfig PDA
+    let (config_pda, config_bump) = Pubkey::find_program_address(
+        &[REFERRAL_CONFIG_SEED],
+        program_id,
+    );
+    
+    if referral_config.key != &config_pda {
+        return Err(FundError::InvalidPDA.into());
+    }
+    
+    // Check if already initialized
+    if !referral_config.data_is_empty() {
+        return Err(FundError::ReferralAlreadyInitialized.into());
+    }
+    
+    // Create ReferralConfig account
+    let rent = Rent::get()?;
+    let space = ReferralConfig::SIZE;
+    let lamports = rent.minimum_balance(space);
+    let current_ts = get_current_timestamp()?;
+    
+    invoke_signed(
+        &system_instruction::create_account(
+            authority.key,
+            referral_config.key,
+            lamports,
+            space as u64,
+            program_id,
+        ),
+        &[authority.clone(), referral_config.clone(), system_program.clone()],
+        &[&[REFERRAL_CONFIG_SEED, &[config_bump]]],
+    )?;
+    
+    // Initialize ReferralConfig
+    let config = ReferralConfig::new(
+        *authority.key,
+        *vault_program.key,
+        args.referrer_share_bps,
+        args.referee_discount_bps,
+        config_bump,
+        current_ts,
+    );
+    
+    config.serialize(&mut *referral_config.data.borrow_mut())?;
+    
+    msg!("🎁 Referral system initialized");
+    msg!("  Authority: {}", authority.key);
+    msg!("  Referrer share: {} bps ({}%)", args.referrer_share_bps, args.referrer_share_bps as f64 / 100.0);
+    msg!("  Referee discount: {} bps ({}%)", args.referee_discount_bps, args.referee_discount_bps as f64 / 100.0);
+    
+    Ok(())
+}
+
+/// Create a referral link
+fn process_create_referral_link(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: CreateReferralLinkArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let referrer = next_account_info(account_info_iter)?;
+    let referral_link = next_account_info(account_info_iter)?;
+    let referral_config = next_account_info(account_info_iter)?;
+    let system_program = next_account_info(account_info_iter)?;
+    
+    // Verify referrer is signer
+    assert_signer(referrer)?;
+    assert_owned_by(referral_config, program_id)?;
+    
+    // Load and verify ReferralConfig
+    let mut config = ReferralConfig::try_from_slice(&referral_config.data.borrow())?;
+    if config.discriminator != REFERRAL_CONFIG_DISCRIMINATOR {
+        return Err(FundError::ReferralNotInitialized.into());
+    }
+    
+    if config.is_paused {
+        return Err(FundError::ReferralPaused.into());
+    }
+    
+    // Validate referral code
+    if args.code.is_empty() || args.code.len() > MAX_REFERRAL_CODE_LEN {
+        return Err(FundError::InvalidReferralCode.into());
+    }
+    
+    // Validate code is alphanumeric
+    for &byte in args.code.iter() {
+        if !byte.is_ascii_alphanumeric() && byte != b'_' && byte != b'-' {
+            return Err(FundError::InvalidReferralCode.into());
+        }
+    }
+    
+    // Derive ReferralLink PDA
+    let link_seeds = ReferralLink::seeds(referrer.key);
+    let link_seeds_refs: Vec<&[u8]> = link_seeds.iter().map(|s| s.as_slice()).collect();
+    let (link_pda, link_bump) = Pubkey::find_program_address(&link_seeds_refs, program_id);
+    
+    if referral_link.key != &link_pda {
+        return Err(FundError::InvalidPDA.into());
+    }
+    
+    // Check if link already exists
+    if !referral_link.data_is_empty() {
+        return Err(FundError::ReferralLinkAlreadyExists.into());
+    }
+    
+    // Create ReferralLink account
+    let rent = Rent::get()?;
+    let space = ReferralLink::SIZE;
+    let lamports = rent.minimum_balance(space);
+    let current_ts = get_current_timestamp()?;
+    
+    invoke_signed(
+        &system_instruction::create_account(
+            referrer.key,
+            referral_link.key,
+            lamports,
+            space as u64,
+            program_id,
+        ),
+        &[referrer.clone(), referral_link.clone(), system_program.clone()],
+        &[&[REFERRAL_LINK_SEED, referrer.key.as_ref(), &[link_bump]]],
+    )?;
+    
+    // Initialize ReferralLink
+    let link = ReferralLink::new(
+        *referrer.key,
+        &args.code,
+        link_bump,
+        current_ts,
+    );
+    
+    link.serialize(&mut *referral_link.data.borrow_mut())?;
+    
+    // Update config stats
+    config.total_referral_links = config.total_referral_links.saturating_add(1);
+    config.last_update_ts = current_ts;
+    config.serialize(&mut *referral_config.data.borrow_mut())?;
+    
+    msg!("🔗 Referral link created");
+    msg!("  Referrer: {}", referrer.key);
+    msg!("  Code: {}", link.code_str());
+    
+    Ok(())
+}
+
+/// Bind referral relationship
+fn process_bind_referral(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let referee = next_account_info(account_info_iter)?;
+    let referral_binding = next_account_info(account_info_iter)?;
+    let referral_link = next_account_info(account_info_iter)?;
+    let referral_config = next_account_info(account_info_iter)?;
+    let system_program = next_account_info(account_info_iter)?;
+    
+    // Verify referee is signer
+    assert_signer(referee)?;
+    assert_owned_by(referral_link, program_id)?;
+    assert_owned_by(referral_config, program_id)?;
+    
+    // Load and verify ReferralConfig
+    let mut config = ReferralConfig::try_from_slice(&referral_config.data.borrow())?;
+    if config.discriminator != REFERRAL_CONFIG_DISCRIMINATOR {
+        return Err(FundError::ReferralNotInitialized.into());
+    }
+    
+    if config.is_paused {
+        return Err(FundError::ReferralPaused.into());
+    }
+    
+    // Load and verify ReferralLink
+    let mut link = ReferralLink::try_from_slice(&referral_link.data.borrow())?;
+    if link.discriminator != REFERRAL_LINK_DISCRIMINATOR {
+        return Err(FundError::ReferralLinkNotFound.into());
+    }
+    
+    if !link.is_active {
+        return Err(FundError::ReferralLinkInactive.into());
+    }
+    
+    // Cannot refer self
+    if referee.key == &link.referrer {
+        return Err(FundError::CannotReferSelf.into());
+    }
+    
+    // Derive ReferralBinding PDA
+    let binding_seeds = ReferralBinding::seeds(referee.key);
+    let binding_seeds_refs: Vec<&[u8]> = binding_seeds.iter().map(|s| s.as_slice()).collect();
+    let (binding_pda, binding_bump) = Pubkey::find_program_address(&binding_seeds_refs, program_id);
+    
+    if referral_binding.key != &binding_pda {
+        return Err(FundError::InvalidPDA.into());
+    }
+    
+    // Check if already bound
+    if !referral_binding.data_is_empty() {
+        return Err(FundError::AlreadyBoundToReferrer.into());
+    }
+    
+    // Create ReferralBinding account
+    let rent = Rent::get()?;
+    let space = ReferralBinding::SIZE;
+    let lamports = rent.minimum_balance(space);
+    let current_ts = get_current_timestamp()?;
+    
+    invoke_signed(
+        &system_instruction::create_account(
+            referee.key,
+            referral_binding.key,
+            lamports,
+            space as u64,
+            program_id,
+        ),
+        &[referee.clone(), referral_binding.clone(), system_program.clone()],
+        &[&[REFERRAL_BINDING_SEED, referee.key.as_ref(), &[binding_bump]]],
+    )?;
+    
+    // Initialize ReferralBinding
+    let binding = ReferralBinding::new(
+        *referee.key,
+        link.referrer,
+        *referral_link.key,
+        binding_bump,
+        current_ts,
+    );
+    
+    binding.serialize(&mut *referral_binding.data.borrow_mut())?;
+    
+    // Update link stats
+    link.record_referral();
+    link.serialize(&mut *referral_link.data.borrow_mut())?;
+    
+    // Update config stats
+    config.total_referred_users = config.total_referred_users.saturating_add(1);
+    config.last_update_ts = current_ts;
+    config.serialize(&mut *referral_config.data.borrow_mut())?;
+    
+    msg!("🤝 Referral binding created");
+    msg!("  Referee: {}", referee.key);
+    msg!("  Referrer: {}", link.referrer);
+    msg!("  Link code: {}", link.code_str());
+    
+    Ok(())
+}
+
+/// Record a referral trade (CPI from Ledger)
+fn process_record_referral_trade(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: RecordReferralTradeArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let _caller = next_account_info(account_info_iter)?;
+    let referral_config = next_account_info(account_info_iter)?;
+    let referral_binding = next_account_info(account_info_iter)?;
+    let referral_link = next_account_info(account_info_iter)?;
+    
+    assert_owned_by(referral_config, program_id)?;
+    assert_owned_by(referral_binding, program_id)?;
+    assert_owned_by(referral_link, program_id)?;
+    
+    // Load and verify ReferralConfig
+    let mut config = ReferralConfig::try_from_slice(&referral_config.data.borrow())?;
+    if config.discriminator != REFERRAL_CONFIG_DISCRIMINATOR {
+        return Err(FundError::ReferralNotInitialized.into());
+    }
+    
+    if config.is_paused {
+        return Err(FundError::ReferralPaused.into());
+    }
+    
+    // Load ReferralBinding
+    let mut binding = ReferralBinding::try_from_slice(&referral_binding.data.borrow())?;
+    if binding.discriminator != REFERRAL_BINDING_DISCRIMINATOR {
+        return Err(FundError::NoReferralBinding.into());
+    }
+    
+    // Load ReferralLink
+    let mut link = ReferralLink::try_from_slice(&referral_link.data.borrow())?;
+    if link.discriminator != REFERRAL_LINK_DISCRIMINATOR {
+        return Err(FundError::ReferralLinkNotFound.into());
+    }
+    
+    let current_ts = get_current_timestamp()?;
+    
+    // Calculate rewards
+    let (referrer_reward, referee_discount, _platform_income) = config.calculate_rewards(
+        args.trade_fee_e6,
+        args.referrer_vip_level,
+        args.referee_vip_level,
+    );
+    
+    // Update binding stats
+    binding.record_trade(
+        args.trade_volume_e6,
+        referrer_reward,
+        referee_discount,
+        current_ts,
+    );
+    binding.serialize(&mut *referral_binding.data.borrow_mut())?;
+    
+    // Update link stats
+    link.record_reward(referrer_reward, referee_discount, args.trade_volume_e6);
+    link.serialize(&mut *referral_link.data.borrow_mut())?;
+    
+    // Update config stats
+    config.record_reward(referrer_reward, referee_discount, args.trade_volume_e6, current_ts);
+    config.serialize(&mut *referral_config.data.borrow_mut())?;
+    
+    msg!("📊 REFERRAL_TRADE_RECORDED:");
+    msg!("  Fee: {}", args.trade_fee_e6);
+    msg!("  Volume: {}", args.trade_volume_e6);
+    msg!("  Referrer reward: {}", referrer_reward);
+    msg!("  Referee discount: {}", referee_discount);
+    
+    Ok(())
+}
+
+/// Update Referral configuration
+fn process_update_referral_config(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: UpdateReferralConfigArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let authority = next_account_info(account_info_iter)?;
+    let referral_config = next_account_info(account_info_iter)?;
+    
+    assert_signer(authority)?;
+    assert_owned_by(referral_config, program_id)?;
+    
+    // Load and verify ReferralConfig
+    let mut config = ReferralConfig::try_from_slice(&referral_config.data.borrow())?;
+    if config.discriminator != REFERRAL_CONFIG_DISCRIMINATOR {
+        return Err(FundError::ReferralNotInitialized.into());
+    }
+    
+    // Verify authority
+    if config.authority != *authority.key {
+        return Err(FundError::AdminRequired.into());
+    }
+    
+    // Update fields if provided
+    if let Some(referrer_share_bps) = args.referrer_share_bps {
+        if referrer_share_bps > 5000 {
+            return Err(FundError::InvalidReferrerShare.into());
+        }
+        config.referrer_share_bps = referrer_share_bps;
+    }
+    
+    if let Some(referee_discount_bps) = args.referee_discount_bps {
+        if referee_discount_bps > 5000 {
+            return Err(FundError::InvalidRefereeDiscount.into());
+        }
+        config.referee_discount_bps = referee_discount_bps;
+    }
+    
+    if let Some(referrer_vip_bonus_bps) = args.referrer_vip_bonus_bps {
+        config.referrer_vip_bonus_bps = referrer_vip_bonus_bps;
+    }
+    
+    if let Some(referee_vip_bonus_bps) = args.referee_vip_bonus_bps {
+        config.referee_vip_bonus_bps = referee_vip_bonus_bps;
+    }
+    
+    if let Some(min_settlement_amount_e6) = args.min_settlement_amount_e6 {
+        config.min_settlement_amount_e6 = min_settlement_amount_e6;
+    }
+    
+    if let Some(is_paused) = args.is_paused {
+        config.is_paused = is_paused;
+    }
+    
+    config.last_update_ts = get_current_timestamp()?;
+    config.serialize(&mut *referral_config.data.borrow_mut())?;
+    
+    msg!("⚙️ Referral config updated");
+    msg!("  Referrer share: {} bps", config.referrer_share_bps);
+    msg!("  Referee discount: {} bps", config.referee_discount_bps);
+    msg!("  Is paused: {}", config.is_paused);
+    
+    Ok(())
+}
+
+/// Deactivate a referral link
+fn process_deactivate_referral_link(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let referrer = next_account_info(account_info_iter)?;
+    let referral_link = next_account_info(account_info_iter)?;
+    
+    assert_signer(referrer)?;
+    assert_owned_by(referral_link, program_id)?;
+    
+    // Load and verify ReferralLink
+    let mut link = ReferralLink::try_from_slice(&referral_link.data.borrow())?;
+    if link.discriminator != REFERRAL_LINK_DISCRIMINATOR {
+        return Err(FundError::ReferralLinkNotFound.into());
+    }
+    
+    // Verify ownership
+    if link.referrer != *referrer.key {
+        return Err(FundError::Unauthorized.into());
+    }
+    
+    // Deactivate
+    link.is_active = false;
+    link.serialize(&mut *referral_link.data.borrow_mut())?;
+    
+    msg!("🔒 Referral link deactivated");
+    msg!("  Referrer: {}", referrer.key);
+    msg!("  Code: {}", link.code_str());
+    
+    Ok(())
+}
+
+/// Set custom referral rates for a link (admin only)
+fn process_set_custom_referral_rates(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: SetCustomReferralRatesArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let authority = next_account_info(account_info_iter)?;
+    let referral_link = next_account_info(account_info_iter)?;
+    let referral_config = next_account_info(account_info_iter)?;
+    
+    assert_signer(authority)?;
+    assert_owned_by(referral_link, program_id)?;
+    assert_owned_by(referral_config, program_id)?;
+    
+    // Verify authority from config
+    let config = ReferralConfig::try_from_slice(&referral_config.data.borrow())?;
+    if config.discriminator != REFERRAL_CONFIG_DISCRIMINATOR {
+        return Err(FundError::ReferralNotInitialized.into());
+    }
+    
+    if config.authority != *authority.key {
+        return Err(FundError::AdminRequired.into());
+    }
+    
+    // Validate rates
+    if args.custom_referrer_share_bps > 5000 {
+        return Err(FundError::InvalidReferrerShare.into());
+    }
+    if args.custom_referee_discount_bps > 5000 {
+        return Err(FundError::InvalidRefereeDiscount.into());
+    }
+    
+    // Load and update ReferralLink
+    let mut link = ReferralLink::try_from_slice(&referral_link.data.borrow())?;
+    if link.discriminator != REFERRAL_LINK_DISCRIMINATOR {
+        return Err(FundError::ReferralLinkNotFound.into());
+    }
+    
+    link.custom_referrer_share_bps = args.custom_referrer_share_bps;
+    link.custom_referee_discount_bps = args.custom_referee_discount_bps;
+    link.serialize(&mut *referral_link.data.borrow_mut())?;
+    
+    msg!("⚙️ Custom referral rates set");
+    msg!("  Link: {}", referral_link.key);
+    msg!("  Custom referrer share: {} bps", args.custom_referrer_share_bps);
+    msg!("  Custom referee discount: {} bps", args.custom_referee_discount_bps);
     
     Ok(())
 }
