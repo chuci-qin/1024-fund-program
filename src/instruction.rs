@@ -349,6 +349,86 @@ pub enum FundInstruction {
     /// 0. `[signer]` Authority (admin only)
     /// 1. `[writable]` ReferralLink PDA
     SetCustomReferralRates(SetCustomReferralRatesArgs),
+    
+    // =========================================================================
+    // Prediction Market Fee Operations (120-139)
+    // =========================================================================
+    
+    /// 初始化预测市场手续费配置
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Authority (admin)
+    /// 1. `[writable]` PredictionMarketFeeConfig PDA
+    /// 2. `[writable]` Prediction Market Fee Vault PDA (Token Account)
+    /// 3. `[]` USDC Mint
+    /// 4. `[]` Prediction Market Program (authorized caller)
+    /// 5. `[]` Token Program
+    /// 6. `[]` System Program
+    InitializePredictionMarketFeeConfig(InitializePredictionMarketFeeConfigArgs),
+    
+    /// 收取预测市场铸造手续费 (CPI from Prediction Market Program)
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Caller Program
+    /// 1. `[writable]` PredictionMarketFeeConfig
+    /// 2. `[writable]` Prediction Market Fee Vault
+    /// 3. `[writable]` Source Token Account (用户的 USDC)
+    /// 4. `[]` Token Program
+    CollectPredictionMarketMintingFee(CollectPredictionMarketMintingFeeArgs),
+    
+    /// 收取预测市场赎回手续费 (CPI from Prediction Market Program)
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Caller Program
+    /// 1. `[writable]` PredictionMarketFeeConfig
+    /// 2. `[writable]` Prediction Market Fee Vault
+    /// 3. `[writable]` Source Token Account
+    /// 4. `[]` Token Program
+    CollectPredictionMarketRedemptionFee(CollectPredictionMarketRedemptionFeeArgs),
+    
+    /// 收取预测市场交易手续费 (CPI from Prediction Market Program)
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Caller Program
+    /// 1. `[writable]` PredictionMarketFeeConfig
+    /// 2. `[writable]` Prediction Market Fee Vault
+    /// 3. `[writable]` Source Token Account
+    /// 4. `[]` Token Program
+    CollectPredictionMarketTradingFee(CollectPredictionMarketTradingFeeArgs),
+    
+    /// 发放预测市场做市商奖励 (Admin or CPI)
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Authority or Caller
+    /// 1. `[writable]` PredictionMarketFeeConfig
+    /// 2. `[writable]` Prediction Market Fee Vault
+    /// 3. `[writable]` Maker's Token Account
+    /// 4. `[]` Token Program
+    DistributePredictionMarketMakerReward(DistributePredictionMarketMakerRewardArgs),
+    
+    /// 发放预测市场创建者分成 (CPI)
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Caller Program
+    /// 1. `[writable]` PredictionMarketFeeConfig
+    /// 2. `[writable]` Prediction Market Fee Vault
+    /// 3. `[writable]` Creator's Token Account
+    /// 4. `[]` Token Program
+    DistributePredictionMarketCreatorReward(DistributePredictionMarketCreatorRewardArgs),
+    
+    /// 更新预测市场手续费配置
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Authority
+    /// 1. `[writable]` PredictionMarketFeeConfig
+    UpdatePredictionMarketFeeConfig(UpdatePredictionMarketFeeConfigArgs),
+    
+    /// 设置预测市场手续费暂停状态
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Authority
+    /// 1. `[writable]` PredictionMarketFeeConfig
+    SetPredictionMarketFeePaused(SetPredictionMarketFeePausedArgs),
 }
 
 // === Argument Structs ===
@@ -599,6 +679,92 @@ pub struct SetCustomReferralRatesArgs {
     pub custom_referrer_share_bps: u16,
     /// Custom referee discount in basis points (0 = use global)
     pub custom_referee_discount_bps: u16,
+}
+
+// === Prediction Market Fee Argument Structs ===
+
+/// Arguments for InitializePredictionMarketFeeConfig instruction
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct InitializePredictionMarketFeeConfigArgs {
+    /// Prediction market minting fee in basis points (default 10 = 0.1%)
+    pub prediction_market_minting_fee_bps: u16,
+    /// Prediction market redemption fee in basis points
+    pub prediction_market_redemption_fee_bps: u16,
+    /// Prediction market taker trading fee in basis points
+    pub prediction_market_trading_fee_taker_bps: u16,
+    /// Prediction market maker trading fee in basis points (usually 0)
+    pub prediction_market_trading_fee_maker_bps: u16,
+    /// Prediction market protocol share of fees in basis points
+    pub prediction_market_protocol_share_bps: u16,
+    /// Prediction market maker reward share in basis points
+    pub prediction_market_maker_reward_share_bps: u16,
+    /// Prediction market creator share in basis points
+    pub prediction_market_creator_share_bps: u16,
+}
+
+/// Arguments for CollectPredictionMarketMintingFee instruction
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct CollectPredictionMarketMintingFeeArgs {
+    /// Prediction market minting amount (e6) - fee calculated based on this
+    pub prediction_market_minting_amount_e6: i64,
+}
+
+/// Arguments for CollectPredictionMarketRedemptionFee instruction
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct CollectPredictionMarketRedemptionFeeArgs {
+    /// Prediction market redemption amount (e6) - fee calculated based on this
+    pub prediction_market_redemption_amount_e6: i64,
+}
+
+/// Arguments for CollectPredictionMarketTradingFee instruction
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct CollectPredictionMarketTradingFeeArgs {
+    /// Prediction market trade volume (e6) - fee calculated based on this
+    pub prediction_market_trade_volume_e6: i64,
+    /// Is this a taker fee?
+    pub is_taker: bool,
+}
+
+/// Arguments for DistributePredictionMarketMakerReward instruction
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct DistributePredictionMarketMakerRewardArgs {
+    /// Prediction market maker reward amount (e6)
+    pub prediction_market_maker_reward_e6: i64,
+}
+
+/// Arguments for DistributePredictionMarketCreatorReward instruction
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct DistributePredictionMarketCreatorRewardArgs {
+    /// Prediction market creator reward amount (e6)
+    pub prediction_market_creator_reward_e6: i64,
+    /// Prediction market ID (for tracking)
+    pub prediction_market_id: u64,
+}
+
+/// Arguments for UpdatePredictionMarketFeeConfig instruction
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct UpdatePredictionMarketFeeConfigArgs {
+    /// New prediction market minting fee (None = no change)
+    pub prediction_market_minting_fee_bps: Option<u16>,
+    /// New prediction market redemption fee (None = no change)
+    pub prediction_market_redemption_fee_bps: Option<u16>,
+    /// New prediction market taker trading fee (None = no change)
+    pub prediction_market_trading_fee_taker_bps: Option<u16>,
+    /// New prediction market maker trading fee (None = no change)
+    pub prediction_market_trading_fee_maker_bps: Option<u16>,
+    /// New prediction market protocol share (None = no change)
+    pub prediction_market_protocol_share_bps: Option<u16>,
+    /// New prediction market maker reward share (None = no change)
+    pub prediction_market_maker_reward_share_bps: Option<u16>,
+    /// New prediction market creator share (None = no change)
+    pub prediction_market_creator_share_bps: Option<u16>,
+}
+
+/// Arguments for SetPredictionMarketFeePaused instruction
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct SetPredictionMarketFeePausedArgs {
+    /// Prediction market fee paused state
+    pub prediction_market_fee_paused: bool,
 }
 
 #[cfg(test)]

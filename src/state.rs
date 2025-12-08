@@ -37,6 +37,9 @@ pub const REFERRAL_LINK_DISCRIMINATOR: u64 = 0x5245465F4C494E4B; // "REF_LINK"
 /// Discriminator for ReferralBinding account
 pub const REFERRAL_BINDING_DISCRIMINATOR: u64 = 0x5245465F42494E44; // "REF_BIND"
 
+/// Discriminator for PredictionMarketFeeConfig account
+pub const PREDICTION_MARKET_FEE_CONFIG_DISCRIMINATOR: u64 = 0x504D5F4645455F43; // "PM_FEE_C"
+
 // === PDA Seeds ===
 
 /// Seed prefix for FundConfig PDA
@@ -68,6 +71,12 @@ pub const REFERRAL_LINK_SEED: &[u8] = b"referral_link";
 
 /// Seed prefix for ReferralBinding PDA
 pub const REFERRAL_BINDING_SEED: &[u8] = b"referral_binding";
+
+/// Seed prefix for PredictionMarketFeeConfig PDA
+pub const PREDICTION_MARKET_FEE_CONFIG_SEED: &[u8] = b"prediction_market_fee_config";
+
+/// Seed prefix for Prediction Market Fee Vault PDA
+pub const PREDICTION_MARKET_FEE_VAULT_SEED: &[u8] = b"prediction_market_fee_vault";
 
 // === Fund Config ===
 
@@ -1469,6 +1478,242 @@ impl ReferralBinding {
         self.referee_discounts_e6 = self.referee_discounts_e6.saturating_add(referee_discount_e6);
         self.trade_count = self.trade_count.saturating_add(1);
         self.last_trade_ts = current_ts;
+    }
+}
+
+// =============================================================================
+// Prediction Market Fee Config
+// =============================================================================
+
+/// 预测市场手续费配置
+/// 
+/// 管理预测市场的手续费收取和分配
+/// 
+/// PDA Seeds: ["prediction_market_fee_config"]
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct PredictionMarketFeeConfig {
+    /// 账户类型标识符
+    pub discriminator: u64,
+    
+    /// 预测市场手续费资金池 (USDC Token Account)
+    pub prediction_market_fee_vault: Pubkey,
+    
+    /// PDA bump
+    pub bump: u8,
+    
+    // === 预测市场费率配置 (basis points, 10000 = 100%) ===
+    
+    /// 预测市场铸造费率 (默认 10 = 0.1%)
+    pub prediction_market_minting_fee_bps: u16,
+    
+    /// 预测市场赎回费率 (默认 10 = 0.1%)
+    pub prediction_market_redemption_fee_bps: u16,
+    
+    /// 预测市场 Taker 交易费率 (默认 10 = 0.1%)
+    pub prediction_market_trading_fee_taker_bps: u16,
+    
+    /// 预测市场 Maker 交易费率 (默认 0 = 0%)
+    pub prediction_market_trading_fee_maker_bps: u16,
+    
+    /// 预测市场结算费率 (默认 0 = 0%)
+    pub prediction_market_settlement_fee_bps: u16,
+    
+    // === 预测市场费用分配比例 (basis points, 总计 10000) ===
+    
+    /// 预测市场协议收入占比 (默认 7000 = 70%)
+    pub prediction_market_protocol_share_bps: u16,
+    
+    /// 预测市场做市商奖励占比 (默认 2000 = 20%)
+    pub prediction_market_maker_reward_share_bps: u16,
+    
+    /// 预测市场创建者占比 (默认 1000 = 10%)
+    pub prediction_market_creator_share_bps: u16,
+    
+    // === 预测市场累计统计 (e6) ===
+    
+    /// 预测市场累计铸造费收入
+    pub prediction_market_total_minting_fee_e6: i64,
+    
+    /// 预测市场累计赎回费收入
+    pub prediction_market_total_redemption_fee_e6: i64,
+    
+    /// 预测市场累计交易费收入
+    pub prediction_market_total_trading_fee_e6: i64,
+    
+    /// 预测市场累计做市商奖励发放
+    pub prediction_market_total_maker_rewards_e6: i64,
+    
+    /// 预测市场累计创建者分成
+    pub prediction_market_total_creator_rewards_e6: i64,
+    
+    /// 预测市场累计协议收入
+    pub prediction_market_total_protocol_income_e6: i64,
+    
+    // === 授权 ===
+    
+    /// 授权调用方 (Prediction Market Program)
+    pub prediction_market_authorized_caller: Pubkey,
+    
+    /// 管理员
+    pub authority: Pubkey,
+    
+    /// 是否暂停
+    pub is_paused: bool,
+    
+    /// 最后更新时间戳
+    pub last_update_ts: i64,
+    
+    /// 预留字段
+    pub reserved: [u8; 64],
+}
+
+impl PredictionMarketFeeConfig {
+    /// 账户大小
+    pub const SIZE: usize = 8   // discriminator
+        + 32  // prediction_market_fee_vault
+        + 1   // bump
+        + 2   // prediction_market_minting_fee_bps
+        + 2   // prediction_market_redemption_fee_bps
+        + 2   // prediction_market_trading_fee_taker_bps
+        + 2   // prediction_market_trading_fee_maker_bps
+        + 2   // prediction_market_settlement_fee_bps
+        + 2   // prediction_market_protocol_share_bps
+        + 2   // prediction_market_maker_reward_share_bps
+        + 2   // prediction_market_creator_share_bps
+        + 8   // prediction_market_total_minting_fee_e6
+        + 8   // prediction_market_total_redemption_fee_e6
+        + 8   // prediction_market_total_trading_fee_e6
+        + 8   // prediction_market_total_maker_rewards_e6
+        + 8   // prediction_market_total_creator_rewards_e6
+        + 8   // prediction_market_total_protocol_income_e6
+        + 32  // prediction_market_authorized_caller
+        + 32  // authority
+        + 1   // is_paused
+        + 8   // last_update_ts
+        + 64; // reserved
+    
+    /// 创建新的 PredictionMarketFeeConfig
+    pub fn new(
+        prediction_market_fee_vault: Pubkey,
+        bump: u8,
+        prediction_market_authorized_caller: Pubkey,
+        authority: Pubkey,
+        created_at: i64,
+    ) -> Self {
+        Self {
+            discriminator: PREDICTION_MARKET_FEE_CONFIG_DISCRIMINATOR,
+            prediction_market_fee_vault,
+            bump,
+            // 默认费率
+            prediction_market_minting_fee_bps: 10,      // 0.1%
+            prediction_market_redemption_fee_bps: 10,   // 0.1%
+            prediction_market_trading_fee_taker_bps: 10, // 0.1%
+            prediction_market_trading_fee_maker_bps: 0,  // 0%
+            prediction_market_settlement_fee_bps: 0,     // 0%
+            // 默认分配比例
+            prediction_market_protocol_share_bps: 7000,      // 70%
+            prediction_market_maker_reward_share_bps: 2000,  // 20%
+            prediction_market_creator_share_bps: 1000,       // 10%
+            // 统计初始化
+            prediction_market_total_minting_fee_e6: 0,
+            prediction_market_total_redemption_fee_e6: 0,
+            prediction_market_total_trading_fee_e6: 0,
+            prediction_market_total_maker_rewards_e6: 0,
+            prediction_market_total_creator_rewards_e6: 0,
+            prediction_market_total_protocol_income_e6: 0,
+            prediction_market_authorized_caller,
+            authority,
+            is_paused: false,
+            last_update_ts: created_at,
+            reserved: [0u8; 64],
+        }
+    }
+    
+    /// PDA seeds
+    pub fn seeds() -> Vec<Vec<u8>> {
+        vec![PREDICTION_MARKET_FEE_CONFIG_SEED.to_vec()]
+    }
+    
+    /// 验证调用方是否授权
+    pub fn is_prediction_market_authorized_caller(&self, caller: &Pubkey) -> bool {
+        caller == &self.prediction_market_authorized_caller
+    }
+    
+    /// 计算预测市场铸造费
+    pub fn calculate_prediction_market_minting_fee(&self, amount_e6: i64) -> i64 {
+        (amount_e6 as i128 * self.prediction_market_minting_fee_bps as i128 / 10000) as i64
+    }
+    
+    /// 计算预测市场赎回费
+    pub fn calculate_prediction_market_redemption_fee(&self, amount_e6: i64) -> i64 {
+        (amount_e6 as i128 * self.prediction_market_redemption_fee_bps as i128 / 10000) as i64
+    }
+    
+    /// 计算预测市场交易费 (Taker)
+    pub fn calculate_prediction_market_taker_fee(&self, volume_e6: i64) -> i64 {
+        (volume_e6 as i128 * self.prediction_market_trading_fee_taker_bps as i128 / 10000) as i64
+    }
+    
+    /// 计算预测市场交易费 (Maker)
+    pub fn calculate_prediction_market_maker_fee(&self, volume_e6: i64) -> i64 {
+        (volume_e6 as i128 * self.prediction_market_trading_fee_maker_bps as i128 / 10000) as i64
+    }
+    
+    /// 分配预测市场手续费
+    /// 返回 (protocol_amount, maker_reward, creator_reward)
+    pub fn distribute_prediction_market_fee(&self, fee_e6: i64) -> (i64, i64, i64) {
+        let protocol = (fee_e6 as i128 * self.prediction_market_protocol_share_bps as i128 / 10000) as i64;
+        let maker = (fee_e6 as i128 * self.prediction_market_maker_reward_share_bps as i128 / 10000) as i64;
+        let creator = (fee_e6 as i128 * self.prediction_market_creator_share_bps as i128 / 10000) as i64;
+        (protocol, maker, creator)
+    }
+    
+    /// 记录预测市场铸造费收入
+    pub fn record_prediction_market_minting_fee(&mut self, fee_e6: i64, current_ts: i64) {
+        self.prediction_market_total_minting_fee_e6 = self.prediction_market_total_minting_fee_e6.saturating_add(fee_e6);
+        let (protocol, _maker, _creator) = self.distribute_prediction_market_fee(fee_e6);
+        self.prediction_market_total_protocol_income_e6 = self.prediction_market_total_protocol_income_e6.saturating_add(protocol);
+        self.last_update_ts = current_ts;
+    }
+    
+    /// 记录预测市场赎回费收入
+    pub fn record_prediction_market_redemption_fee(&mut self, fee_e6: i64, current_ts: i64) {
+        self.prediction_market_total_redemption_fee_e6 = self.prediction_market_total_redemption_fee_e6.saturating_add(fee_e6);
+        let (protocol, _maker, _creator) = self.distribute_prediction_market_fee(fee_e6);
+        self.prediction_market_total_protocol_income_e6 = self.prediction_market_total_protocol_income_e6.saturating_add(protocol);
+        self.last_update_ts = current_ts;
+    }
+    
+    /// 记录预测市场交易费收入
+    pub fn record_prediction_market_trading_fee(&mut self, fee_e6: i64, current_ts: i64) {
+        self.prediction_market_total_trading_fee_e6 = self.prediction_market_total_trading_fee_e6.saturating_add(fee_e6);
+        let (protocol, _maker, _creator) = self.distribute_prediction_market_fee(fee_e6);
+        self.prediction_market_total_protocol_income_e6 = self.prediction_market_total_protocol_income_e6.saturating_add(protocol);
+        self.last_update_ts = current_ts;
+    }
+    
+    /// 记录预测市场做市商奖励发放
+    pub fn record_prediction_market_maker_reward(&mut self, reward_e6: i64, current_ts: i64) {
+        self.prediction_market_total_maker_rewards_e6 = self.prediction_market_total_maker_rewards_e6.saturating_add(reward_e6);
+        self.last_update_ts = current_ts;
+    }
+    
+    /// 记录预测市场创建者分成发放
+    pub fn record_prediction_market_creator_reward(&mut self, reward_e6: i64, current_ts: i64) {
+        self.prediction_market_total_creator_rewards_e6 = self.prediction_market_total_creator_rewards_e6.saturating_add(reward_e6);
+        self.last_update_ts = current_ts;
+    }
+    
+    /// 获取预测市场总手续费收入
+    pub fn prediction_market_total_fee_income_e6(&self) -> i64 {
+        self.prediction_market_total_minting_fee_e6
+            .saturating_add(self.prediction_market_total_redemption_fee_e6)
+            .saturating_add(self.prediction_market_total_trading_fee_e6)
+    }
+    
+    /// 获取预测市场总奖励发放
+    pub fn prediction_market_total_rewards_distributed_e6(&self) -> i64 {
+        self.prediction_market_total_maker_rewards_e6.saturating_add(self.prediction_market_total_creator_rewards_e6)
     }
 }
 
