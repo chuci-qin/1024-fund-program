@@ -354,6 +354,63 @@ pub enum FundInstruction {
     // Prediction Market Fee Operations (120-139)
     // =========================================================================
     
+    // =========================================================================
+    // Relayer Instructions (200-249) - Admin/Relayer 代替用户签名
+    // =========================================================================
+    
+    /// Relayer 版本的 DepositToFund
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Admin/Relayer
+    /// 1. `[writable]` Fund PDA
+    /// 2. `[writable]` Fund vault PDA
+    /// 3. `[writable]` User's Vault Account (Vault Program)
+    /// 4. `[writable]` LP Position PDA
+    /// 5. `[writable]` LP's share token account
+    /// 6. `[writable]` Share mint PDA
+    /// 7. `[]` VaultConfig
+    /// 8. `[]` Vault Program
+    /// 9. `[]` Token Program
+    /// 10. `[]` System Program
+    RelayerDepositToFund(RelayerDepositToFundArgs),
+    
+    /// Relayer 版本的 RedeemFromFund
+    RelayerRedeemFromFund(RelayerRedeemFromFundArgs),
+    
+    /// Relayer 版本的 RedeemFromInsuranceFund
+    RelayerRedeemFromInsuranceFund(RelayerRedeemFromInsuranceFundArgs),
+    
+    /// Relayer 版本的 SquarePayment
+    RelayerSquarePayment(RelayerSquarePaymentArgs),
+    
+    /// Relayer 版本的 BindReferral
+    RelayerBindReferral(RelayerBindReferralArgs),
+    
+    // =========================================================================
+    // Relayer Management Instructions (250-259)
+    // =========================================================================
+    
+    /// 添加授权 Relayer (Admin only)
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Authority (admin)
+    /// 1. `[writable]` FundConfig PDA
+    AddRelayer(AddRelayerArgs),
+    
+    /// 移除 Relayer (Admin only)
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Authority (admin)
+    /// 1. `[writable]` FundConfig PDA
+    RemoveRelayer(RemoveRelayerArgs),
+    
+    /// 更新 Relayer 限额配置 (Admin only)
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Authority (admin)
+    /// 1. `[writable]` FundConfig PDA
+    UpdateRelayerLimits(UpdateRelayerLimitsArgs),
+
     /// 初始化预测市场手续费配置
     /// 
     /// Accounts:
@@ -765,6 +822,94 @@ pub struct UpdatePredictionMarketFeeConfigArgs {
 pub struct SetPredictionMarketFeePausedArgs {
     /// Prediction market fee paused state
     pub prediction_market_fee_paused: bool,
+}
+
+// ============================================================================
+// Relayer Instructions (200-249) - Admin/Relayer 代替用户签名
+// ============================================================================
+
+/// Relayer 版本的 DepositToFund
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct RelayerDepositToFundArgs {
+    /// 用户钱包地址
+    pub user_wallet: Pubkey,
+    /// Amount to deposit (in USDC, 6 decimals)
+    pub amount: u64,
+}
+
+/// Relayer 版本的 RedeemFromFund
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct RelayerRedeemFromFundArgs {
+    /// 用户钱包地址
+    pub user_wallet: Pubkey,
+    /// Number of shares to redeem
+    pub shares: u64,
+}
+
+/// Relayer 版本的 RedeemFromInsuranceFund
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct RelayerRedeemFromInsuranceFundArgs {
+    /// 用户钱包地址
+    pub user_wallet: Pubkey,
+    /// Number of shares to redeem
+    pub shares: u64,
+}
+
+/// Relayer 版本的 SquarePayment
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct RelayerSquarePaymentArgs {
+    /// 付款用户钱包地址
+    pub payer_wallet: Pubkey,
+    /// Creator address (content owner)
+    pub creator: Pubkey,
+    /// Content ID (unique identifier for the content)
+    pub content_id: u64,
+    /// Payment type: 0 = KnowledgePurchase, 1 = Subscription, 2 = LiveDonation
+    pub payment_type: u8,
+    /// Total payment amount (e6)
+    pub amount_e6: i64,
+    /// Creator share in basis points (e.g., 9000 = 90%)
+    pub creator_share_bps: u16,
+    /// Subscription period (number of months, 0 for non-subscription)
+    pub subscription_period: u8,
+    /// Optional memo (max 32 bytes)
+    pub memo: Vec<u8>,
+}
+
+/// Relayer 版本的 BindReferral
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct RelayerBindReferralArgs {
+    /// 新用户钱包地址
+    pub user_wallet: Pubkey,
+    /// Referral link address
+    pub referral_link: Pubkey,
+}
+
+// ============================================================================
+// Relayer Management Instructions (250-259)
+// ============================================================================
+
+/// 添加授权 Relayer
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct AddRelayerArgs {
+    /// 新 Relayer 公钥
+    pub relayer: Pubkey,
+}
+
+/// 移除 Relayer
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct RemoveRelayerArgs {
+    /// 要移除的 Relayer 公钥
+    pub relayer: Pubkey,
+}
+
+/// 更新 Relayer 限额配置
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct UpdateRelayerLimitsArgs {
+    /// 单笔交易限额 (e6), 0 = 无限制
+    pub single_tx_limit_e6: Option<i64>,
+    /// 每日限额 (e6), 0 = 无限制
+    pub daily_limit_e6: Option<i64>,
 }
 
 #[cfg(test)]

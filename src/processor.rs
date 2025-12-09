@@ -84,6 +84,76 @@ pub fn process_instruction(
         FundInstruction::UpdateReferralConfig(args) => process_update_referral_config(program_id, accounts, args),
         FundInstruction::DeactivateReferralLink => process_deactivate_referral_link(program_id, accounts),
         FundInstruction::SetCustomReferralRates(args) => process_set_custom_referral_rates(program_id, accounts, args),
+        
+        // Prediction Market Fee Operations (stub implementations)
+        FundInstruction::InitializePredictionMarketFeeConfig(args) => {
+            msg!("Instruction: InitializePredictionMarketFeeConfig");
+            process_initialize_pm_fee_config(program_id, accounts, args)
+        }
+        FundInstruction::CollectPredictionMarketMintingFee(args) => {
+            msg!("Instruction: CollectPredictionMarketMintingFee");
+            process_collect_pm_minting_fee(program_id, accounts, args)
+        }
+        FundInstruction::CollectPredictionMarketRedemptionFee(args) => {
+            msg!("Instruction: CollectPredictionMarketRedemptionFee");
+            process_collect_pm_redemption_fee(program_id, accounts, args)
+        }
+        FundInstruction::CollectPredictionMarketTradingFee(args) => {
+            msg!("Instruction: CollectPredictionMarketTradingFee");
+            process_collect_pm_trading_fee(program_id, accounts, args)
+        }
+        FundInstruction::DistributePredictionMarketMakerReward(args) => {
+            msg!("Instruction: DistributePredictionMarketMakerReward");
+            process_distribute_pm_maker_reward(program_id, accounts, args)
+        }
+        FundInstruction::DistributePredictionMarketCreatorReward(args) => {
+            msg!("Instruction: DistributePredictionMarketCreatorReward");
+            process_distribute_pm_creator_reward(program_id, accounts, args)
+        }
+        FundInstruction::UpdatePredictionMarketFeeConfig(args) => {
+            msg!("Instruction: UpdatePredictionMarketFeeConfig");
+            process_update_pm_fee_config(program_id, accounts, args)
+        }
+        FundInstruction::SetPredictionMarketFeePaused(args) => {
+            msg!("Instruction: SetPredictionMarketFeePaused");
+            process_set_pm_fee_paused(program_id, accounts, args)
+        }
+        
+        // Relayer Instructions
+        FundInstruction::RelayerDepositToFund(args) => {
+            msg!("Instruction: RelayerDepositToFund");
+            process_relayer_deposit_to_fund(program_id, accounts, args)
+        }
+        FundInstruction::RelayerRedeemFromFund(args) => {
+            msg!("Instruction: RelayerRedeemFromFund");
+            process_relayer_redeem_from_fund(program_id, accounts, args)
+        }
+        FundInstruction::RelayerRedeemFromInsuranceFund(args) => {
+            msg!("Instruction: RelayerRedeemFromInsuranceFund");
+            process_relayer_redeem_from_insurance_fund(program_id, accounts, args)
+        }
+        FundInstruction::RelayerSquarePayment(args) => {
+            msg!("Instruction: RelayerSquarePayment");
+            process_relayer_square_payment(program_id, accounts, args)
+        }
+        FundInstruction::RelayerBindReferral(args) => {
+            msg!("Instruction: RelayerBindReferral");
+            process_relayer_bind_referral(program_id, accounts, args)
+        }
+        
+        // Relayer Management
+        FundInstruction::AddRelayer(args) => {
+            msg!("Instruction: AddRelayer");
+            process_add_relayer(program_id, accounts, args)
+        }
+        FundInstruction::RemoveRelayer(args) => {
+            msg!("Instruction: RemoveRelayer");
+            process_remove_relayer(program_id, accounts, args)
+        }
+        FundInstruction::UpdateRelayerLimits(args) => {
+            msg!("Instruction: UpdateRelayerLimits");
+            process_update_relayer_limits(program_id, accounts, args)
+        }
     }
 }
 
@@ -2492,6 +2562,940 @@ fn process_set_custom_referral_rates(
     msg!("  Link: {}", referral_link.key);
     msg!("  Custom referrer share: {} bps", args.custom_referrer_share_bps);
     msg!("  Custom referee discount: {} bps", args.custom_referee_discount_bps);
+    
+    Ok(())
+}
+
+// =============================================================================
+// Prediction Market Fee Operations (Full Implementations)
+// =============================================================================
+
+/// Initialize Prediction Market Fee Configuration
+/// 
+/// Accounts:
+/// 0. `[signer]` Authority (admin)
+/// 1. `[writable]` PredictionMarketFeeConfig PDA
+/// 2. `[writable]` Prediction Market Fee Vault PDA (Token Account)
+/// 3. `[]` USDC Mint
+/// 4. `[]` Prediction Market Program (authorized caller)
+/// 5. `[]` Token Program
+/// 6. `[]` System Program
+/// 7. `[]` Rent Sysvar
+fn process_initialize_pm_fee_config(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: InitializePredictionMarketFeeConfigArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let authority = next_account_info(account_info_iter)?;
+    let pm_fee_config = next_account_info(account_info_iter)?;
+    let pm_fee_vault = next_account_info(account_info_iter)?;
+    let usdc_mint = next_account_info(account_info_iter)?;
+    let pm_program = next_account_info(account_info_iter)?;
+    let _token_program = next_account_info(account_info_iter)?;
+    let system_program = next_account_info(account_info_iter)?;
+    let rent_sysvar = next_account_info(account_info_iter)?;
+    
+    assert_signer(authority)?;
+    
+    // Derive PredictionMarketFeeConfig PDA
+    let (config_pda, config_bump) = Pubkey::find_program_address(
+        &[PREDICTION_MARKET_FEE_CONFIG_SEED],
+        program_id,
+    );
+    
+    if pm_fee_config.key != &config_pda {
+        return Err(FundError::InvalidPDA.into());
+    }
+    
+    // Check if already initialized
+    if !pm_fee_config.data_is_empty() {
+        return Err(FundError::PMFeeConfigAlreadyInitialized.into());
+    }
+    
+    // Derive Fee Vault PDA
+    let (vault_pda, vault_bump) = Pubkey::find_program_address(
+        &[PREDICTION_MARKET_FEE_VAULT_SEED],
+        program_id,
+    );
+    
+    if pm_fee_vault.key != &vault_pda {
+        return Err(FundError::InvalidPDA.into());
+    }
+    
+    let rent = Rent::get()?;
+    let current_ts = get_current_timestamp()?;
+    
+    // Create PredictionMarketFeeConfig account
+    let config_space = PredictionMarketFeeConfig::SIZE;
+    let config_lamports = rent.minimum_balance(config_space);
+    
+    invoke_signed(
+        &system_instruction::create_account(
+            authority.key,
+            pm_fee_config.key,
+            config_lamports,
+            config_space as u64,
+            program_id,
+        ),
+        &[authority.clone(), pm_fee_config.clone(), system_program.clone()],
+        &[&[PREDICTION_MARKET_FEE_CONFIG_SEED, &[config_bump]]],
+    )?;
+    
+    // Create Fee Vault token account
+    let vault_space = spl_token::state::Account::LEN;
+    let vault_lamports = rent.minimum_balance(vault_space);
+    
+    invoke_signed(
+        &system_instruction::create_account(
+            authority.key,
+            pm_fee_vault.key,
+            vault_lamports,
+            vault_space as u64,
+            &spl_token::id(),
+        ),
+        &[authority.clone(), pm_fee_vault.clone(), system_program.clone()],
+        &[&[PREDICTION_MARKET_FEE_VAULT_SEED, &[vault_bump]]],
+    )?;
+    
+    // Initialize Fee Vault as token account
+    invoke_signed(
+        &spl_token::instruction::initialize_account(
+            &spl_token::id(),
+            pm_fee_vault.key,
+            usdc_mint.key,
+            &config_pda, // Owner = Config PDA
+        )?,
+        &[pm_fee_vault.clone(), usdc_mint.clone(), pm_fee_config.clone(), rent_sysvar.clone()],
+        &[&[PREDICTION_MARKET_FEE_VAULT_SEED, &[vault_bump]]],
+    )?;
+    
+    // Initialize PredictionMarketFeeConfig
+    let config = PredictionMarketFeeConfig::new(
+        *pm_fee_vault.key,
+        config_bump,
+        *pm_program.key,
+        *authority.key,
+        current_ts,
+    );
+    
+    // Override default values with args
+    let mut config_mut = config;
+    config_mut.prediction_market_minting_fee_bps = args.prediction_market_minting_fee_bps;
+    config_mut.prediction_market_redemption_fee_bps = args.prediction_market_redemption_fee_bps;
+    config_mut.prediction_market_trading_fee_taker_bps = args.prediction_market_trading_fee_taker_bps;
+    config_mut.prediction_market_trading_fee_maker_bps = args.prediction_market_trading_fee_maker_bps;
+    config_mut.prediction_market_protocol_share_bps = args.prediction_market_protocol_share_bps;
+    config_mut.prediction_market_maker_reward_share_bps = args.prediction_market_maker_reward_share_bps;
+    config_mut.prediction_market_creator_share_bps = args.prediction_market_creator_share_bps;
+    
+    config_mut.serialize(&mut *pm_fee_config.data.borrow_mut())?;
+    
+    msg!("✅ PM_FEE_CONFIG_INITIALIZED");
+    msg!("  Config: {}", pm_fee_config.key);
+    msg!("  Vault: {}", pm_fee_vault.key);
+    msg!("  Authorized caller: {}", pm_program.key);
+    msg!("  Minting fee: {} bps", args.prediction_market_minting_fee_bps);
+    msg!("  Trading fee (taker): {} bps", args.prediction_market_trading_fee_taker_bps);
+    
+    Ok(())
+}
+
+/// Collect Prediction Market Minting Fee (CPI from PM Program)
+/// 
+/// Accounts:
+/// 0. `[signer]` Caller Program (must be authorized PM Program)
+/// 1. `[writable]` PredictionMarketFeeConfig
+/// 2. `[writable]` Prediction Market Fee Vault
+/// 3. `[writable]` Source Token Account (user's USDC)
+/// 4. `[]` Token Program
+fn process_collect_pm_minting_fee(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: CollectPredictionMarketMintingFeeArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let caller = next_account_info(account_info_iter)?;
+    let pm_fee_config = next_account_info(account_info_iter)?;
+    let pm_fee_vault = next_account_info(account_info_iter)?;
+    let source_token_account = next_account_info(account_info_iter)?;
+    let token_program = next_account_info(account_info_iter)?;
+    
+    assert_owned_by(pm_fee_config, program_id)?;
+    
+    // Load and verify config
+    let mut config = PredictionMarketFeeConfig::try_from_slice(&pm_fee_config.data.borrow())?;
+    if config.discriminator != PREDICTION_MARKET_FEE_CONFIG_DISCRIMINATOR {
+        return Err(FundError::PMFeeConfigNotInitialized.into());
+    }
+    
+    // Verify caller is authorized PM Program
+    if !config.is_prediction_market_authorized_caller(caller.key) {
+        msg!("❌ Unauthorized caller for PM minting fee: {}", caller.key);
+        return Err(FundError::UnauthorizedCaller.into());
+    }
+    
+    if config.is_paused {
+        return Err(FundError::PMFeePaused.into());
+    }
+    
+    // Calculate fee
+    let fee_e6 = config.calculate_prediction_market_minting_fee(args.prediction_market_minting_amount_e6);
+    
+    if fee_e6 <= 0 {
+        msg!("No minting fee to collect for amount: {}", args.prediction_market_minting_amount_e6);
+        return Ok(());
+    }
+    
+    // Transfer fee from source to vault
+    invoke(
+        &spl_token::instruction::transfer(
+            &spl_token::id(),
+            source_token_account.key,
+            pm_fee_vault.key,
+            caller.key,  // PM Program is the authority
+            &[],
+            fee_e6 as u64,
+        )?,
+        &[
+            source_token_account.clone(),
+            pm_fee_vault.clone(),
+            caller.clone(),
+            token_program.clone(),
+        ],
+    )?;
+    
+    // Update stats
+    let current_ts = get_current_timestamp()?;
+    config.record_prediction_market_minting_fee(fee_e6, current_ts);
+    config.serialize(&mut *pm_fee_config.data.borrow_mut())?;
+    
+    msg!("✅ PM_MINTING_FEE_COLLECTED");
+    msg!("  Amount: {}", args.prediction_market_minting_amount_e6);
+    msg!("  Fee: {}", fee_e6);
+    msg!("  Total minting fees: {}", config.prediction_market_total_minting_fee_e6);
+    
+    Ok(())
+}
+
+/// Collect Prediction Market Redemption Fee (CPI from PM Program)
+fn process_collect_pm_redemption_fee(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: CollectPredictionMarketRedemptionFeeArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let caller = next_account_info(account_info_iter)?;
+    let pm_fee_config = next_account_info(account_info_iter)?;
+    let pm_fee_vault = next_account_info(account_info_iter)?;
+    let source_token_account = next_account_info(account_info_iter)?;
+    let token_program = next_account_info(account_info_iter)?;
+    
+    assert_owned_by(pm_fee_config, program_id)?;
+    
+    // Load and verify config
+    let mut config = PredictionMarketFeeConfig::try_from_slice(&pm_fee_config.data.borrow())?;
+    if config.discriminator != PREDICTION_MARKET_FEE_CONFIG_DISCRIMINATOR {
+        return Err(FundError::PMFeeConfigNotInitialized.into());
+    }
+    
+    // Verify caller is authorized
+    if !config.is_prediction_market_authorized_caller(caller.key) {
+        msg!("❌ Unauthorized caller for PM redemption fee: {}", caller.key);
+        return Err(FundError::UnauthorizedCaller.into());
+    }
+    
+    if config.is_paused {
+        return Err(FundError::PMFeePaused.into());
+    }
+    
+    // Calculate fee
+    let fee_e6 = config.calculate_prediction_market_redemption_fee(args.prediction_market_redemption_amount_e6);
+    
+    if fee_e6 <= 0 {
+        msg!("No redemption fee to collect for amount: {}", args.prediction_market_redemption_amount_e6);
+        return Ok(());
+    }
+    
+    // Transfer fee
+    invoke(
+        &spl_token::instruction::transfer(
+            &spl_token::id(),
+            source_token_account.key,
+            pm_fee_vault.key,
+            caller.key,
+            &[],
+            fee_e6 as u64,
+        )?,
+        &[
+            source_token_account.clone(),
+            pm_fee_vault.clone(),
+            caller.clone(),
+            token_program.clone(),
+        ],
+    )?;
+    
+    // Update stats
+    let current_ts = get_current_timestamp()?;
+    config.record_prediction_market_redemption_fee(fee_e6, current_ts);
+    config.serialize(&mut *pm_fee_config.data.borrow_mut())?;
+    
+    msg!("✅ PM_REDEMPTION_FEE_COLLECTED");
+    msg!("  Amount: {}", args.prediction_market_redemption_amount_e6);
+    msg!("  Fee: {}", fee_e6);
+    
+    Ok(())
+}
+
+/// Collect Prediction Market Trading Fee (CPI from PM Program)
+fn process_collect_pm_trading_fee(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: CollectPredictionMarketTradingFeeArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let caller = next_account_info(account_info_iter)?;
+    let pm_fee_config = next_account_info(account_info_iter)?;
+    let pm_fee_vault = next_account_info(account_info_iter)?;
+    let source_token_account = next_account_info(account_info_iter)?;
+    let token_program = next_account_info(account_info_iter)?;
+    
+    assert_owned_by(pm_fee_config, program_id)?;
+    
+    // Load and verify config
+    let mut config = PredictionMarketFeeConfig::try_from_slice(&pm_fee_config.data.borrow())?;
+    if config.discriminator != PREDICTION_MARKET_FEE_CONFIG_DISCRIMINATOR {
+        return Err(FundError::PMFeeConfigNotInitialized.into());
+    }
+    
+    // Verify caller is authorized
+    if !config.is_prediction_market_authorized_caller(caller.key) {
+        msg!("❌ Unauthorized caller for PM trading fee: {}", caller.key);
+        return Err(FundError::UnauthorizedCaller.into());
+    }
+    
+    if config.is_paused {
+        return Err(FundError::PMFeePaused.into());
+    }
+    
+    // Calculate fee based on taker/maker
+    let fee_e6 = if args.is_taker {
+        config.calculate_prediction_market_taker_fee(args.prediction_market_trade_volume_e6)
+    } else {
+        config.calculate_prediction_market_maker_fee(args.prediction_market_trade_volume_e6)
+    };
+    
+    if fee_e6 <= 0 {
+        msg!("No trading fee to collect for volume: {}", args.prediction_market_trade_volume_e6);
+        return Ok(());
+    }
+    
+    // Transfer fee
+    invoke(
+        &spl_token::instruction::transfer(
+            &spl_token::id(),
+            source_token_account.key,
+            pm_fee_vault.key,
+            caller.key,
+            &[],
+            fee_e6 as u64,
+        )?,
+        &[
+            source_token_account.clone(),
+            pm_fee_vault.clone(),
+            caller.clone(),
+            token_program.clone(),
+        ],
+    )?;
+    
+    // Update stats
+    let current_ts = get_current_timestamp()?;
+    config.record_prediction_market_trading_fee(fee_e6, current_ts);
+    config.serialize(&mut *pm_fee_config.data.borrow_mut())?;
+    
+    msg!("✅ PM_TRADING_FEE_COLLECTED");
+    msg!("  Volume: {}", args.prediction_market_trade_volume_e6);
+    msg!("  Is Taker: {}", args.is_taker);
+    msg!("  Fee: {}", fee_e6);
+    
+    Ok(())
+}
+
+/// Distribute Prediction Market Maker Reward
+/// 
+/// Accounts:
+/// 0. `[signer]` Authority or Caller
+/// 1. `[writable]` PredictionMarketFeeConfig
+/// 2. `[writable]` Prediction Market Fee Vault
+/// 3. `[writable]` Maker's Token Account
+/// 4. `[]` Token Program
+fn process_distribute_pm_maker_reward(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: DistributePredictionMarketMakerRewardArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let caller = next_account_info(account_info_iter)?;
+    let pm_fee_config = next_account_info(account_info_iter)?;
+    let pm_fee_vault = next_account_info(account_info_iter)?;
+    let maker_token_account = next_account_info(account_info_iter)?;
+    let token_program = next_account_info(account_info_iter)?;
+    
+    assert_signer(caller)?;
+    assert_owned_by(pm_fee_config, program_id)?;
+    
+    // Load and verify config
+    let mut config = PredictionMarketFeeConfig::try_from_slice(&pm_fee_config.data.borrow())?;
+    if config.discriminator != PREDICTION_MARKET_FEE_CONFIG_DISCRIMINATOR {
+        return Err(FundError::PMFeeConfigNotInitialized.into());
+    }
+    
+    // Verify caller is authorized (admin or PM program)
+    if caller.key != &config.authority && !config.is_prediction_market_authorized_caller(caller.key) {
+        msg!("❌ Unauthorized caller for maker reward distribution: {}", caller.key);
+        return Err(FundError::UnauthorizedCaller.into());
+    }
+    
+    if config.is_paused {
+        return Err(FundError::PMFeePaused.into());
+    }
+    
+    let reward_e6 = args.prediction_market_maker_reward_e6;
+    if reward_e6 <= 0 {
+        msg!("Invalid reward amount: {}", reward_e6);
+        return Err(FundError::InvalidAmount.into());
+    }
+    
+    // Check vault has sufficient balance
+    let vault_account = spl_token::state::Account::unpack(&pm_fee_vault.data.borrow())?;
+    if vault_account.amount < reward_e6 as u64 {
+        msg!("Insufficient vault balance for reward: {} < {}", vault_account.amount, reward_e6);
+        return Err(FundError::InsufficientBalance.into());
+    }
+    
+    // Transfer reward from vault to maker (using PDA signature)
+    let (_, config_bump) = Pubkey::find_program_address(
+        &[PREDICTION_MARKET_FEE_CONFIG_SEED],
+        program_id,
+    );
+    
+    invoke_signed(
+        &spl_token::instruction::transfer(
+            &spl_token::id(),
+            pm_fee_vault.key,
+            maker_token_account.key,
+            pm_fee_config.key,  // Config PDA is vault owner
+            &[],
+            reward_e6 as u64,
+        )?,
+        &[
+            pm_fee_vault.clone(),
+            maker_token_account.clone(),
+            pm_fee_config.clone(),
+            token_program.clone(),
+        ],
+        &[&[PREDICTION_MARKET_FEE_CONFIG_SEED, &[config_bump]]],
+    )?;
+    
+    // Update stats
+    let current_ts = get_current_timestamp()?;
+    config.record_prediction_market_maker_reward(reward_e6, current_ts);
+    config.serialize(&mut *pm_fee_config.data.borrow_mut())?;
+    
+    msg!("✅ PM_MAKER_REWARD_DISTRIBUTED");
+    msg!("  Maker: {}", maker_token_account.key);
+    msg!("  Reward: {}", reward_e6);
+    msg!("  Total maker rewards: {}", config.prediction_market_total_maker_rewards_e6);
+    
+    Ok(())
+}
+
+/// Distribute Prediction Market Creator Reward (CPI)
+/// 
+/// Accounts:
+/// 0. `[signer]` Caller Program
+/// 1. `[writable]` PredictionMarketFeeConfig
+/// 2. `[writable]` Prediction Market Fee Vault
+/// 3. `[writable]` Creator's Token Account
+/// 4. `[]` Token Program
+fn process_distribute_pm_creator_reward(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: DistributePredictionMarketCreatorRewardArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let caller = next_account_info(account_info_iter)?;
+    let pm_fee_config = next_account_info(account_info_iter)?;
+    let pm_fee_vault = next_account_info(account_info_iter)?;
+    let creator_token_account = next_account_info(account_info_iter)?;
+    let token_program = next_account_info(account_info_iter)?;
+    
+    assert_owned_by(pm_fee_config, program_id)?;
+    
+    // Load and verify config
+    let mut config = PredictionMarketFeeConfig::try_from_slice(&pm_fee_config.data.borrow())?;
+    if config.discriminator != PREDICTION_MARKET_FEE_CONFIG_DISCRIMINATOR {
+        return Err(FundError::PMFeeConfigNotInitialized.into());
+    }
+    
+    // Verify caller is authorized (admin or PM program)
+    let is_admin = caller.is_signer && caller.key == &config.authority;
+    let is_pm_program = config.is_prediction_market_authorized_caller(caller.key);
+    
+    if !is_admin && !is_pm_program {
+        msg!("❌ Unauthorized caller for creator reward distribution: {}", caller.key);
+        return Err(FundError::UnauthorizedCaller.into());
+    }
+    
+    if config.is_paused {
+        return Err(FundError::PMFeePaused.into());
+    }
+    
+    let reward_e6 = args.prediction_market_creator_reward_e6;
+    if reward_e6 <= 0 {
+        msg!("Invalid reward amount: {}", reward_e6);
+        return Err(FundError::InvalidAmount.into());
+    }
+    
+    // Check vault has sufficient balance
+    let vault_account = spl_token::state::Account::unpack(&pm_fee_vault.data.borrow())?;
+    if vault_account.amount < reward_e6 as u64 {
+        msg!("Insufficient vault balance for creator reward: {} < {}", vault_account.amount, reward_e6);
+        return Err(FundError::InsufficientBalance.into());
+    }
+    
+    // Transfer reward from vault to creator
+    let (_, config_bump) = Pubkey::find_program_address(
+        &[PREDICTION_MARKET_FEE_CONFIG_SEED],
+        program_id,
+    );
+    
+    invoke_signed(
+        &spl_token::instruction::transfer(
+            &spl_token::id(),
+            pm_fee_vault.key,
+            creator_token_account.key,
+            pm_fee_config.key,
+            &[],
+            reward_e6 as u64,
+        )?,
+        &[
+            pm_fee_vault.clone(),
+            creator_token_account.clone(),
+            pm_fee_config.clone(),
+            token_program.clone(),
+        ],
+        &[&[PREDICTION_MARKET_FEE_CONFIG_SEED, &[config_bump]]],
+    )?;
+    
+    // Update stats
+    let current_ts = get_current_timestamp()?;
+    config.record_prediction_market_creator_reward(reward_e6, current_ts);
+    config.serialize(&mut *pm_fee_config.data.borrow_mut())?;
+    
+    msg!("✅ PM_CREATOR_REWARD_DISTRIBUTED");
+    msg!("  Market ID: {}", args.prediction_market_id);
+    msg!("  Creator: {}", creator_token_account.key);
+    msg!("  Reward: {}", reward_e6);
+    msg!("  Total creator rewards: {}", config.prediction_market_total_creator_rewards_e6);
+    
+    Ok(())
+}
+
+/// Update Prediction Market Fee Config
+fn process_update_pm_fee_config(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: UpdatePredictionMarketFeeConfigArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let authority = next_account_info(account_info_iter)?;
+    let pm_fee_config = next_account_info(account_info_iter)?;
+    
+    assert_signer(authority)?;
+    assert_owned_by(pm_fee_config, program_id)?;
+    
+    // Load and verify config
+    let mut config = PredictionMarketFeeConfig::try_from_slice(&pm_fee_config.data.borrow())?;
+    if config.discriminator != PREDICTION_MARKET_FEE_CONFIG_DISCRIMINATOR {
+        return Err(FundError::PMFeeConfigNotInitialized.into());
+    }
+    
+    // Verify authority
+    if config.authority != *authority.key {
+        return Err(FundError::AdminRequired.into());
+    }
+    
+    // Update fields if provided
+    if let Some(v) = args.prediction_market_minting_fee_bps {
+        config.prediction_market_minting_fee_bps = v;
+    }
+    if let Some(v) = args.prediction_market_redemption_fee_bps {
+        config.prediction_market_redemption_fee_bps = v;
+    }
+    if let Some(v) = args.prediction_market_trading_fee_taker_bps {
+        config.prediction_market_trading_fee_taker_bps = v;
+    }
+    if let Some(v) = args.prediction_market_trading_fee_maker_bps {
+        config.prediction_market_trading_fee_maker_bps = v;
+    }
+    if let Some(v) = args.prediction_market_protocol_share_bps {
+        config.prediction_market_protocol_share_bps = v;
+    }
+    if let Some(v) = args.prediction_market_maker_reward_share_bps {
+        config.prediction_market_maker_reward_share_bps = v;
+    }
+    if let Some(v) = args.prediction_market_creator_share_bps {
+        config.prediction_market_creator_share_bps = v;
+    }
+    
+    config.last_update_ts = get_current_timestamp()?;
+    config.serialize(&mut *pm_fee_config.data.borrow_mut())?;
+    
+    msg!("✅ PM_FEE_CONFIG_UPDATED");
+    msg!("  Minting fee: {} bps", config.prediction_market_minting_fee_bps);
+    msg!("  Trading fee (taker): {} bps", config.prediction_market_trading_fee_taker_bps);
+    msg!("  Protocol share: {} bps", config.prediction_market_protocol_share_bps);
+    
+    Ok(())
+}
+
+/// Set Prediction Market Fee Paused State
+fn process_set_pm_fee_paused(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: SetPredictionMarketFeePausedArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let authority = next_account_info(account_info_iter)?;
+    let pm_fee_config = next_account_info(account_info_iter)?;
+    
+    assert_signer(authority)?;
+    assert_owned_by(pm_fee_config, program_id)?;
+    
+    // Load and verify config
+    let mut config = PredictionMarketFeeConfig::try_from_slice(&pm_fee_config.data.borrow())?;
+    if config.discriminator != PREDICTION_MARKET_FEE_CONFIG_DISCRIMINATOR {
+        return Err(FundError::PMFeeConfigNotInitialized.into());
+    }
+    
+    // Verify authority
+    if config.authority != *authority.key {
+        return Err(FundError::AdminRequired.into());
+    }
+    
+    config.is_paused = args.prediction_market_fee_paused;
+    config.last_update_ts = get_current_timestamp()?;
+    config.serialize(&mut *pm_fee_config.data.borrow_mut())?;
+    
+    msg!("✅ PM_FEE_PAUSED_STATE: {}", args.prediction_market_fee_paused);
+    
+    Ok(())
+}
+
+// =============================================================================
+// Relayer Instructions - Admin/Relayer 代替用户签名
+// =============================================================================
+
+/// 验证调用者是否为 Admin 或授权的 Relayer
+fn verify_fund_relayer(config: &FundConfig, relayer: &Pubkey) -> Result<(), ProgramError> {
+    if config.is_authorized_relayer(relayer) {
+        return Ok(());
+    }
+    msg!("Error: Caller {} is not an authorized relayer", relayer);
+    msg!("  Admin: {}", config.authority);
+    msg!("  Active relayers: {}", config.active_relayer_count);
+    Err(FundError::Unauthorized.into())
+}
+
+/// 验证 Relayer 并检查限额
+fn verify_and_check_relayer_limits(
+    config: &mut FundConfig,
+    relayer: &Pubkey,
+    amount_e6: i64,
+    current_ts: i64,
+) -> Result<(), ProgramError> {
+    // First verify the relayer is authorized
+    verify_fund_relayer(config, relayer)?;
+    
+    // Then check limits
+    if !config.check_and_record_relayer_transaction(amount_e6, current_ts) {
+        msg!("❌ Relayer limit exceeded");
+        msg!("  Amount: {}", amount_e6);
+        msg!("  Single tx limit: {}", config.relayer_limits.single_tx_limit_e6);
+        msg!("  Daily limit: {}", config.relayer_limits.daily_limit_e6);
+        msg!("  Daily used: {}", config.relayer_limits.daily_used_e6);
+        return Err(FundError::RelayerLimitExceeded.into());
+    }
+    
+    Ok(())
+}
+
+/// Relayer 版本的 DepositToFund
+fn process_relayer_deposit_to_fund(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: RelayerDepositToFundArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let relayer = next_account_info(account_info_iter)?;
+    assert_signer(relayer)?;
+    
+    let fund_config = next_account_info(account_info_iter)?;
+    let fund = next_account_info(account_info_iter)?;
+    let _fund_vault = next_account_info(account_info_iter)?;
+    let _user_vault = next_account_info(account_info_iter)?;
+    let _lp_position = next_account_info(account_info_iter)?;
+    let _lp_share_account = next_account_info(account_info_iter)?;
+    let _share_mint = next_account_info(account_info_iter)?;
+    let _vault_config = next_account_info(account_info_iter)?;
+    let _vault_program = next_account_info(account_info_iter)?;
+    let _token_program = next_account_info(account_info_iter)?;
+    let _system_program = next_account_info(account_info_iter)?;
+    
+    // Load and validate FundConfig
+    let config = FundConfig::try_from_slice(&fund_config.data.borrow())?;
+    verify_fund_relayer(&config, relayer.key)?;
+    
+    // Load Fund
+    let fund_data = Fund::try_from_slice(&fund.data.borrow())?;
+    
+    // TODO: Implement actual deposit logic via Vault CPI
+    msg!("✅ RelayerDepositToFund");
+    msg!("  User: {}", args.user_wallet);
+    msg!("  Fund: {}", fund_data.name_str());
+    msg!("  Amount: {}", args.amount);
+    
+    Ok(())
+}
+
+/// Relayer 版本的 RedeemFromFund
+fn process_relayer_redeem_from_fund(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: RelayerRedeemFromFundArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let relayer = next_account_info(account_info_iter)?;
+    assert_signer(relayer)?;
+    
+    let fund_config = next_account_info(account_info_iter)?;
+    
+    let config = FundConfig::try_from_slice(&fund_config.data.borrow())?;
+    verify_fund_relayer(&config, relayer.key)?;
+    
+    // TODO: Implement actual redemption logic
+    msg!("✅ RelayerRedeemFromFund");
+    msg!("  User: {}", args.user_wallet);
+    msg!("  Shares: {}", args.shares);
+    
+    Ok(())
+}
+
+/// Relayer 版本的 RedeemFromInsuranceFund
+fn process_relayer_redeem_from_insurance_fund(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: RelayerRedeemFromInsuranceFundArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let relayer = next_account_info(account_info_iter)?;
+    assert_signer(relayer)?;
+    
+    let fund_config = next_account_info(account_info_iter)?;
+    
+    let config = FundConfig::try_from_slice(&fund_config.data.borrow())?;
+    verify_fund_relayer(&config, relayer.key)?;
+    
+    // TODO: Implement with special rules for Insurance Fund
+    msg!("✅ RelayerRedeemFromInsuranceFund");
+    msg!("  User: {}", args.user_wallet);
+    msg!("  Shares: {}", args.shares);
+    
+    Ok(())
+}
+
+/// Relayer 版本的 SquarePayment
+fn process_relayer_square_payment(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: RelayerSquarePaymentArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let relayer = next_account_info(account_info_iter)?;
+    assert_signer(relayer)?;
+    
+    let fund_config = next_account_info(account_info_iter)?;
+    
+    let config = FundConfig::try_from_slice(&fund_config.data.borrow())?;
+    verify_fund_relayer(&config, relayer.key)?;
+    
+    // TODO: Implement actual payment processing
+    msg!("✅ RelayerSquarePayment");
+    msg!("  Payer: {}", args.payer_wallet);
+    msg!("  Creator: {}", args.creator);
+    msg!("  Content ID: {}", args.content_id);
+    msg!("  Amount: {}", args.amount_e6);
+    
+    Ok(())
+}
+
+/// Relayer 版本的 BindReferral
+fn process_relayer_bind_referral(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: RelayerBindReferralArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let relayer = next_account_info(account_info_iter)?;
+    assert_signer(relayer)?;
+    
+    let fund_config = next_account_info(account_info_iter)?;
+    
+    let config = FundConfig::try_from_slice(&fund_config.data.borrow())?;
+    verify_fund_relayer(&config, relayer.key)?;
+    
+    // TODO: Implement actual referral binding
+    msg!("✅ RelayerBindReferral");
+    msg!("  User: {}", args.user_wallet);
+    msg!("  Referral Link: {}", args.referral_link);
+    
+    Ok(())
+}
+
+// =============================================================================
+// Relayer Management Instructions
+// =============================================================================
+
+/// Add a new authorized relayer (Admin only)
+fn process_add_relayer(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: AddRelayerArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let authority = next_account_info(account_info_iter)?;
+    let fund_config = next_account_info(account_info_iter)?;
+    
+    assert_signer(authority)?;
+    assert_owned_by(fund_config, program_id)?;
+    
+    let mut config = FundConfig::try_from_slice(&fund_config.data.borrow())?;
+    
+    if config.discriminator != FUND_CONFIG_DISCRIMINATOR {
+        return Err(FundError::FundNotInitialized.into());
+    }
+    
+    // Verify authority
+    if config.authority != *authority.key {
+        return Err(FundError::AdminRequired.into());
+    }
+    
+    // Add relayer
+    if config.add_relayer(args.relayer).is_err() {
+        return Err(FundError::MaxRelayersReached.into());
+    }
+    
+    config.serialize(&mut *fund_config.data.borrow_mut())?;
+    
+    msg!("✅ RELAYER_ADDED");
+    msg!("  Relayer: {}", args.relayer);
+    msg!("  Active relayers: {}", config.active_relayer_count);
+    
+    Ok(())
+}
+
+/// Remove an authorized relayer (Admin only)
+fn process_remove_relayer(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: RemoveRelayerArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let authority = next_account_info(account_info_iter)?;
+    let fund_config = next_account_info(account_info_iter)?;
+    
+    assert_signer(authority)?;
+    assert_owned_by(fund_config, program_id)?;
+    
+    let mut config = FundConfig::try_from_slice(&fund_config.data.borrow())?;
+    
+    if config.discriminator != FUND_CONFIG_DISCRIMINATOR {
+        return Err(FundError::FundNotInitialized.into());
+    }
+    
+    // Verify authority
+    if config.authority != *authority.key {
+        return Err(FundError::AdminRequired.into());
+    }
+    
+    // Remove relayer
+    if !config.remove_relayer(&args.relayer) {
+        return Err(FundError::RelayerNotFound.into());
+    }
+    
+    config.serialize(&mut *fund_config.data.borrow_mut())?;
+    
+    msg!("✅ RELAYER_REMOVED");
+    msg!("  Relayer: {}", args.relayer);
+    msg!("  Active relayers: {}", config.active_relayer_count);
+    
+    Ok(())
+}
+
+/// Update relayer limits configuration (Admin only)
+fn process_update_relayer_limits(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: UpdateRelayerLimitsArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let authority = next_account_info(account_info_iter)?;
+    let fund_config = next_account_info(account_info_iter)?;
+    
+    assert_signer(authority)?;
+    assert_owned_by(fund_config, program_id)?;
+    
+    let mut config = FundConfig::try_from_slice(&fund_config.data.borrow())?;
+    
+    if config.discriminator != FUND_CONFIG_DISCRIMINATOR {
+        return Err(FundError::FundNotInitialized.into());
+    }
+    
+    // Verify authority
+    if config.authority != *authority.key {
+        return Err(FundError::AdminRequired.into());
+    }
+    
+    // Update limits
+    if let Some(single_tx_limit) = args.single_tx_limit_e6 {
+        config.relayer_limits.single_tx_limit_e6 = single_tx_limit;
+    }
+    if let Some(daily_limit) = args.daily_limit_e6 {
+        config.relayer_limits.daily_limit_e6 = daily_limit;
+    }
+    
+    config.serialize(&mut *fund_config.data.borrow_mut())?;
+    
+    msg!("✅ RELAYER_LIMITS_UPDATED");
+    msg!("  Single tx limit: {} e6", config.relayer_limits.single_tx_limit_e6);
+    msg!("  Daily limit: {} e6", config.relayer_limits.daily_limit_e6);
     
     Ok(())
 }

@@ -263,6 +263,38 @@ pub enum FundError {
     /// [112] Invalid referee discount
     #[error("Invalid referee discount: must be <= 5000 bps (50%)")]
     InvalidRefereeDiscount,
+    
+    // === Prediction Market Fee 错误 (120-139) ===
+    
+    /// [120] PM Fee Config already initialized
+    #[error("Prediction Market Fee Config is already initialized")]
+    PMFeeConfigAlreadyInitialized,
+    
+    /// [121] PM Fee Config not initialized
+    #[error("Prediction Market Fee Config is not initialized")]
+    PMFeeConfigNotInitialized,
+    
+    /// [122] PM Fee paused
+    #[error("Prediction Market Fee operations are paused")]
+    PMFeePaused,
+    
+    /// [123] PM Fee vault insufficient balance
+    #[error("Prediction Market Fee vault has insufficient balance")]
+    PMFeeVaultInsufficientBalance,
+    
+    // === Relayer 错误 (140-149) ===
+    
+    /// [140] Relayer limit exceeded
+    #[error("Relayer operation limit exceeded (single tx or daily limit)")]
+    RelayerLimitExceeded,
+    
+    /// [141] Max relayers reached
+    #[error("Maximum number of relayers reached")]
+    MaxRelayersReached,
+    
+    /// [142] Relayer not found
+    #[error("Relayer not found in authorized list")]
+    RelayerNotFound,
 }
 
 impl From<FundError> for ProgramError {

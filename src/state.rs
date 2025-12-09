@@ -40,6 +40,17 @@ pub const REFERRAL_BINDING_DISCRIMINATOR: u64 = 0x5245465F42494E44; // "REF_BIND
 /// Discriminator for PredictionMarketFeeConfig account
 pub const PREDICTION_MARKET_FEE_CONFIG_DISCRIMINATOR: u64 = 0x504D5F4645455F43; // "PM_FEE_C"
 
+// === Relayer Constants ===
+
+/// Maximum number of relayers
+pub const MAX_RELAYERS: usize = 5;
+
+/// Default single transaction limit (100,000 USDC in e6)
+pub const DEFAULT_SINGLE_TX_LIMIT_E6: i64 = 100_000_000_000;
+
+/// Default daily limit (1,000,000 USDC in e6)
+pub const DEFAULT_DAILY_LIMIT_E6: i64 = 1_000_000_000_000;
+
 // === PDA Seeds ===
 
 /// Seed prefix for FundConfig PDA
@@ -78,6 +89,82 @@ pub const PREDICTION_MARKET_FEE_CONFIG_SEED: &[u8] = b"prediction_market_fee_con
 /// Seed prefix for Prediction Market Fee Vault PDA
 pub const PREDICTION_MARKET_FEE_VAULT_SEED: &[u8] = b"prediction_market_fee_vault";
 
+// === Relayer Limits ===
+
+/// Relayer operation limits configuration
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Copy, Default)]
+pub struct RelayerLimits {
+    /// Single transaction limit (e6)
+    pub single_tx_limit_e6: i64,
+    /// Daily limit (e6)
+    pub daily_limit_e6: i64,
+    /// Today's used amount (e6)
+    pub daily_used_e6: i64,
+    /// Last reset timestamp (Unix timestamp)
+    pub last_reset_ts: i64,
+}
+
+impl RelayerLimits {
+    /// Size in bytes
+    pub const SIZE: usize = 8 + 8 + 8 + 8;
+    
+    /// Create new RelayerLimits with default values
+    pub fn new() -> Self {
+        Self {
+            single_tx_limit_e6: DEFAULT_SINGLE_TX_LIMIT_E6,
+            daily_limit_e6: DEFAULT_DAILY_LIMIT_E6,
+            daily_used_e6: 0,
+            last_reset_ts: 0,
+        }
+    }
+    
+    /// Check and reset daily limit if needed
+    pub fn check_and_reset_daily(&mut self, current_ts: i64) {
+        // Reset if it's a new day (86400 seconds = 1 day)
+        let last_day = self.last_reset_ts / 86400;
+        let current_day = current_ts / 86400;
+        if current_day > last_day {
+            self.daily_used_e6 = 0;
+            self.last_reset_ts = current_ts;
+        }
+    }
+    
+    /// Check if a transaction amount is within limits
+    pub fn check_limits(&mut self, amount_e6: i64, current_ts: i64) -> bool {
+        // Check single transaction limit
+        if self.single_tx_limit_e6 > 0 && amount_e6 > self.single_tx_limit_e6 {
+            return false;
+        }
+        
+        // Check and reset daily limit
+        self.check_and_reset_daily(current_ts);
+        
+        // Check daily limit
+        if self.daily_limit_e6 > 0 {
+            let new_daily_used = self.daily_used_e6.saturating_add(amount_e6);
+            if new_daily_used > self.daily_limit_e6 {
+                return false;
+            }
+        }
+        
+        true
+    }
+    
+    /// Record a transaction
+    pub fn record_transaction(&mut self, amount_e6: i64, current_ts: i64) {
+        self.check_and_reset_daily(current_ts);
+        self.daily_used_e6 = self.daily_used_e6.saturating_add(amount_e6);
+    }
+    
+    /// Get remaining daily limit
+    pub fn remaining_daily_limit(&self) -> i64 {
+        if self.daily_limit_e6 == 0 {
+            return i64::MAX; // Unlimited
+        }
+        self.daily_limit_e6.saturating_sub(self.daily_used_e6)
+    }
+}
+
 // === Fund Config ===
 
 /// Global configuration for the Fund Program
@@ -110,8 +197,22 @@ pub struct FundConfig {
     /// PDA bump
     pub bump: u8,
     
+    // === Multi-Relayer Support (H-2) ===
+    
+    /// Authorized relayers (up to MAX_RELAYERS)
+    pub authorized_relayers: [Pubkey; MAX_RELAYERS],
+    
+    /// Active status for each relayer
+    pub relayer_active: [bool; MAX_RELAYERS],
+    
+    /// Number of active relayers
+    pub active_relayer_count: u8,
+    
+    /// Relayer operation limits
+    pub relayer_limits: RelayerLimits,
+    
     /// Reserved for future use
-    pub reserved: [u8; 64],
+    pub reserved: [u8; 32],
 }
 
 impl FundConfig {
@@ -125,7 +226,11 @@ impl FundConfig {
         + 8   // total_tvl_e6
         + 1   // is_paused
         + 1   // bump
-        + 64; // reserved
+        + (32 * MAX_RELAYERS)  // authorized_relayers
+        + MAX_RELAYERS  // relayer_active
+        + 1   // active_relayer_count
+        + RelayerLimits::SIZE  // relayer_limits
+        + 32; // reserved
     
     /// Create a new FundConfig
     pub fn new(authority: Pubkey, vault_program: Pubkey, ledger_program: Pubkey, bump: u8) -> Self {
@@ -139,13 +244,84 @@ impl FundConfig {
             total_tvl_e6: 0,
             is_paused: false,
             bump,
-            reserved: [0u8; 64],
+            authorized_relayers: [Pubkey::default(); MAX_RELAYERS],
+            relayer_active: [false; MAX_RELAYERS],
+            active_relayer_count: 0,
+            relayer_limits: RelayerLimits::new(),
+            reserved: [0u8; 32],
         }
     }
     
     /// PDA seeds for FundConfig
     pub fn seeds() -> Vec<Vec<u8>> {
         vec![FUND_CONFIG_SEED.to_vec()]
+    }
+    
+    /// Check if a pubkey is an authorized relayer
+    pub fn is_authorized_relayer(&self, relayer: &Pubkey) -> bool {
+        // Admin is always authorized
+        if relayer == &self.authority {
+            return true;
+        }
+        
+        // Check relayer list
+        for i in 0..MAX_RELAYERS {
+            if self.relayer_active[i] && self.authorized_relayers[i] == *relayer {
+                return true;
+            }
+        }
+        
+        false
+    }
+    
+    /// Add a new authorized relayer
+    pub fn add_relayer(&mut self, relayer: Pubkey) -> Result<(), ()> {
+        // Check if already exists
+        for i in 0..MAX_RELAYERS {
+            if self.authorized_relayers[i] == relayer {
+                // Reactivate if inactive
+                if !self.relayer_active[i] {
+                    self.relayer_active[i] = true;
+                    self.active_relayer_count = self.active_relayer_count.saturating_add(1);
+                }
+                return Ok(());
+            }
+        }
+        
+        // Find empty slot
+        for i in 0..MAX_RELAYERS {
+            if self.authorized_relayers[i] == Pubkey::default() || !self.relayer_active[i] {
+                self.authorized_relayers[i] = relayer;
+                self.relayer_active[i] = true;
+                self.active_relayer_count = self.active_relayer_count.saturating_add(1);
+                return Ok(());
+            }
+        }
+        
+        // No space
+        Err(())
+    }
+    
+    /// Remove a relayer
+    pub fn remove_relayer(&mut self, relayer: &Pubkey) -> bool {
+        for i in 0..MAX_RELAYERS {
+            if self.authorized_relayers[i] == *relayer && self.relayer_active[i] {
+                self.relayer_active[i] = false;
+                self.active_relayer_count = self.active_relayer_count.saturating_sub(1);
+                return true;
+            }
+        }
+        false
+    }
+    
+    /// Check relayer limits and record transaction
+    pub fn check_and_record_relayer_transaction(&mut self, amount_e6: i64, current_ts: i64) -> bool {
+        if self.relayer_limits.check_limits(amount_e6, current_ts) {
+            self.relayer_limits.record_transaction(amount_e6, current_ts);
+            true
+        } else {
+            false
+        }
     }
 }
 
