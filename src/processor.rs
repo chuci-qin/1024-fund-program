@@ -3609,9 +3609,9 @@ fn process_initialize_spot_fee_config(
         &[&[SPOT_FEE_VAULT_SEED, &[spot_fee_vault_bump]]],
     )?;
     
-    // Initialize token account
+    // Initialize token account (使用 initialize_account3，不需要 Rent sysvar)
     invoke(
-        &spl_token::instruction::initialize_account(
+        &spl_token::instruction::initialize_account3(
             token_program.key,
             spot_fee_vault_info.key,
             usdc_mint.key,
