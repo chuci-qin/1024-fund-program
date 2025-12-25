@@ -486,6 +486,59 @@ pub enum FundInstruction {
     /// 0. `[signer]` Authority
     /// 1. `[writable]` PredictionMarketFeeConfig
     SetPredictionMarketFeePaused(SetPredictionMarketFeePausedArgs),
+
+    // =========================================================================
+    // Spot Trading Fee Operations (140-159)
+    // =========================================================================
+
+    /// 初始化 Spot 交易手续费配置
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Authority (admin)
+    /// 1. `[writable]` SpotTradingFeeConfig PDA
+    /// 2. `[writable]` Spot Fee Vault PDA (Token Account)
+    /// 3. `[]` USDC Mint
+    /// 4. `[]` Vault Program (authorized caller)
+    /// 5. `[]` Token Program
+    /// 6. `[]` System Program
+    InitializeSpotTradingFeeConfig(InitializeSpotTradingFeeConfigArgs),
+
+    /// 收取 Spot 交易手续费 (CPI from Vault/Ledger)
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Caller Program
+    /// 1. `[writable]` SpotTradingFeeConfig
+    /// 2. `[writable]` Spot Fee Vault
+    /// 3. `[writable]` Source Token Account
+    /// 4. `[]` Token Program
+    CollectSpotTradingFee(CollectSpotTradingFeeArgs),
+
+    /// 分配 Spot 手续费到各池
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Authority or Relayer
+    /// 1. `[writable]` SpotTradingFeeConfig
+    /// 2. `[writable]` Spot Fee Vault
+    /// 3. `[writable]` Insurance Fund Vault
+    /// 4. `[]` Token Program
+    DistributeSpotFee(DistributeSpotFeeArgs),
+
+    /// 发放 Spot 做市商奖励
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Authority
+    /// 1. `[writable]` SpotTradingFeeConfig
+    /// 2. `[writable]` Spot Fee Vault
+    /// 3. `[writable]` Maker's Token Account
+    /// 4. `[]` Token Program
+    DistributeSpotMakerReward(DistributeSpotMakerRewardArgs),
+
+    /// 更新 Spot 手续费配置
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Authority
+    /// 1. `[writable]` SpotTradingFeeConfig
+    UpdateSpotTradingFeeConfig(UpdateSpotTradingFeeConfigArgs),
 }
 
 // === Argument Structs ===
@@ -910,6 +963,59 @@ pub struct UpdateRelayerLimitsArgs {
     pub single_tx_limit_e6: Option<i64>,
     /// 每日限额 (e6), 0 = 无限制
     pub daily_limit_e6: Option<i64>,
+}
+
+// ============================================================================
+// Spot Trading Fee Arguments
+// ============================================================================
+
+/// 初始化 Spot 交易手续费配置
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct InitializeSpotTradingFeeConfigArgs {
+    /// 授权调用方 (Vault Program)
+    pub authorized_caller: Pubkey,
+}
+
+/// 收取 Spot 交易手续费
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct CollectSpotTradingFeeArgs {
+    /// 交易金额 (e6)
+    pub volume_e6: i64,
+    /// 是否为 Taker
+    pub is_taker: bool,
+}
+
+/// 分配 Spot 手续费
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct DistributeSpotFeeArgs {
+    /// 要分配的金额 (e6), 0 = 分配全部余额
+    pub amount_e6: i64,
+}
+
+/// 发放 Spot 做市商奖励
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct DistributeSpotMakerRewardArgs {
+    /// 做市商地址
+    pub maker: Pubkey,
+    /// 奖励金额 (e6)
+    pub reward_e6: i64,
+}
+
+/// 更新 Spot 手续费配置
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct UpdateSpotTradingFeeConfigArgs {
+    /// Taker 费率 (bps)
+    pub taker_fee_bps: Option<u16>,
+    /// Maker 费率 (bps)
+    pub maker_fee_bps: Option<u16>,
+    /// 协议收入占比 (bps)
+    pub protocol_share_bps: Option<u16>,
+    /// 保险基金占比 (bps)
+    pub insurance_share_bps: Option<u16>,
+    /// 返佣池占比 (bps)
+    pub referral_share_bps: Option<u16>,
+    /// 做市商激励占比 (bps)
+    pub maker_reward_share_bps: Option<u16>,
 }
 
 #[cfg(test)]

@@ -317,6 +317,101 @@ pub struct PredictionMarketFeeConfig {
 }
 ```
 
+### 7. SpotTradingFeeConfig (Spot 交易手续费配置) 🆕
+
+**PDA Seeds:** `["spot_trading_fee_config"]`
+
+> Spot 交易手续费管理，类似于 PredictionMarketFeeConfig
+
+```rust
+pub struct SpotTradingFeeConfig {
+    pub discriminator: u64,
+    pub spot_fee_vault: Pubkey,              // 多 Token 手续费池 (可使用 USDC 统一或分 Token)
+    pub bump: u8,
+    
+    // === 默认费率配置 (basis points) ===
+    // 注意: 每个 SpotMarket 可覆盖默认费率
+    pub default_taker_fee_bps: u16,          // 默认 Taker 费率 (50 = 0.05%)
+    pub default_maker_fee_bps: i16,          // 默认 Maker 费率 (-20 = -0.02% 返佣)
+    
+    // === 分配比例 (总计 10000) ===
+    pub protocol_share_bps: u16,             // 协议收入 (6000 = 60%)
+    pub insurance_fund_share_bps: u16,       // 保险基金 (2000 = 20%)
+    pub referral_share_bps: u16,             // 返佣系统 (1500 = 15%)
+    pub maker_reward_share_bps: u16,         // 做市商奖励 (500 = 5%)
+    
+    // === 累计统计 ===
+    pub total_taker_fee_collected_e6: i64,   // Taker 费用总收入
+    pub total_maker_fee_paid_e6: i64,        // Maker 返佣总支出 (负数)
+    pub total_protocol_income_e6: i64,       // 协议净收入
+    pub total_insurance_fund_income_e6: i64, // 保险基金收入
+    pub total_referral_rewards_e6: i64,      // 返佣系统收入
+    pub total_maker_rewards_e6: i64,         // 做市商奖励收入
+    
+    // === 按 Token 统计 (可选，用于多 Token 手续费) ===
+    pub fee_by_token: [TokenFeeStats; 16],   // 按 Token 分别统计
+    
+    // === 管理 ===
+    pub authorized_caller: Pubkey,           // Vault Program PDA
+    pub authority: Pubkey,
+    pub is_paused: bool,
+    pub last_update_ts: i64,
+    pub reserved: [u8; 64],
+}
+
+/// 按 Token 的手续费统计
+pub struct TokenFeeStats {
+    pub token_index: u16,                    // Token 索引
+    pub total_collected_e6: i64,             // 该 Token 收取的总手续费
+    pub total_distributed_e6: i64,           // 该 Token 分配的总手续费
+}
+```
+
+### Spot 手续费流程
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Spot 手续费完整流程                                   │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│   Step 1: 成交时收取                                                     │
+│   ├── Taker 支付 taker_fee (从 Quote Token 扣除)                        │
+│   ├── Maker 收取 maker_rebate (负费率 = 返佣)                           │
+│   └── 净手续费 = taker_fee - maker_rebate                               │
+│                                                                         │
+│   Step 2: 即时分配                                                       │
+│   ├── 协议收入 (60%) → 协议国库 Vault                                   │
+│   ├── 保险基金 (20%) → Insurance Fund                                   │
+│   ├── 返佣系统 (15%) → 邀请人返佣池                                     │
+│   └── 做市商奖励 (5%) → 做市商奖励池                                     │
+│                                                                         │
+│   Step 3: 返佣处理                                                       │
+│   ├── 检查 ReferralBinding 是否存在                                     │
+│   ├── 计算邀请人返佣 = 返佣池 × referrer_share                          │
+│   ├── 计算被邀请人折扣 = 已包含在 taker_fee 中                          │
+│   └── 更新 ReferralBinding 统计                                         │
+│                                                                         │
+│   Step 4: 做市商奖励 (每日/每周结算)                                     │
+│   ├── 统计做市商提供的流动性和成交量                                    │
+│   ├── 按权重分配做市商奖励池                                            │
+│   └── 发放到做市商账户                                                  │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Spot 手续费 vs Perp/PM 手续费对比
+
+| 维度 | Perp 手续费 | Spot 手续费 | PM 手续费 |
+|------|------------|------------|----------|
+| 结算币种 | USDC | Quote Token (通常 USDC) | USDC |
+| Taker 默认费率 | 0.05% | 0.05% | 0.1% |
+| Maker 默认费率 | 0.02% | -0.02% (返佣) | 0% |
+| 协议分成 | 60% | 60% | 70% |
+| 保险基金 | 20% | 20% | - |
+| 返佣系统 | 15% | 15% | - |
+| 做市商奖励 | 5% | 5% | 20% |
+| 创建者分成 | - | - | 10% |
+
 ---
 
 ## 指令详解
@@ -378,6 +473,18 @@ pub struct PredictionMarketFeeConfig {
 | `DistributePredictionMarketCreatorReward` | 发放创建者分成 | PM Program (CPI) |
 | `UpdatePredictionMarketFeeConfig` | 更新费率配置 | Admin |
 | `SetPredictionMarketFeePaused` | 暂停/恢复 | Admin |
+
+### Spot 交易手续费指令 🆕
+
+| 指令 | 说明 | 调用者 |
+|------|------|--------|
+| `InitializeSpotTradingFeeConfig` | 初始化 Spot 手续费配置 | Admin |
+| `CollectSpotTradingFee` | 收取 Spot 交易手续费 | Vault Program (CPI) |
+| `DistributeSpotFee` | 分配 Spot 手续费到各池 | Relayer / System |
+| `DistributeSpotMakerReward` | 发放 Spot 做市商奖励 | Admin / Relayer |
+| `UpdateSpotTradingFeeConfig` | 更新 Spot 费率配置 | Admin |
+| `SetSpotFeePaused` | 暂停/恢复 Spot 手续费 | Admin |
+| `GetSpotFeeStats` | 查询 Spot 手续费统计 | Anyone (Read) |
 
 ### Relayer 指令
 

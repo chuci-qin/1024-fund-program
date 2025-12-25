@@ -119,6 +119,28 @@ pub fn process_instruction(
             process_set_pm_fee_paused(program_id, accounts, args)
         }
         
+        // Spot Trading Fee Instructions
+        FundInstruction::InitializeSpotTradingFeeConfig(args) => {
+            msg!("Instruction: InitializeSpotTradingFeeConfig");
+            process_initialize_spot_fee_config(program_id, accounts, args)
+        }
+        FundInstruction::CollectSpotTradingFee(args) => {
+            msg!("Instruction: CollectSpotTradingFee");
+            process_collect_spot_trading_fee(program_id, accounts, args)
+        }
+        FundInstruction::DistributeSpotFee(args) => {
+            msg!("Instruction: DistributeSpotFee");
+            process_distribute_spot_fee(program_id, accounts, args)
+        }
+        FundInstruction::DistributeSpotMakerReward(args) => {
+            msg!("Instruction: DistributeSpotMakerReward");
+            process_distribute_spot_maker_reward(program_id, accounts, args)
+        }
+        FundInstruction::UpdateSpotTradingFeeConfig(args) => {
+            msg!("Instruction: UpdateSpotTradingFeeConfig");
+            process_update_spot_fee_config(program_id, accounts, args)
+        }
+        
         // Relayer Instructions
         FundInstruction::RelayerDepositToFund(args) => {
             msg!("Instruction: RelayerDepositToFund");
@@ -3496,6 +3518,296 @@ fn process_update_relayer_limits(
     msg!("✅ RELAYER_LIMITS_UPDATED");
     msg!("  Single tx limit: {} e6", config.relayer_limits.single_tx_limit_e6);
     msg!("  Daily limit: {} e6", config.relayer_limits.daily_limit_e6);
+    
+    Ok(())
+}
+
+// =============================================================================
+// Spot Trading Fee Instructions
+// =============================================================================
+
+use crate::state::{SpotTradingFeeConfig, SPOT_TRADING_FEE_CONFIG_DISCRIMINATOR, SPOT_TRADING_FEE_CONFIG_SEED, SPOT_FEE_VAULT_SEED};
+use crate::instruction::{
+    InitializeSpotTradingFeeConfigArgs, CollectSpotTradingFeeArgs, DistributeSpotFeeArgs,
+    DistributeSpotMakerRewardArgs, UpdateSpotTradingFeeConfigArgs
+};
+use solana_program::clock::Clock;
+
+/// 初始化 Spot 交易手续费配置
+fn process_initialize_spot_fee_config(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: InitializeSpotTradingFeeConfigArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let authority = next_account_info(account_info_iter)?;
+    let spot_fee_config_info = next_account_info(account_info_iter)?;
+    let spot_fee_vault_info = next_account_info(account_info_iter)?;
+    let usdc_mint = next_account_info(account_info_iter)?;
+    let _authorized_caller = next_account_info(account_info_iter)?;
+    let token_program = next_account_info(account_info_iter)?;
+    let system_program = next_account_info(account_info_iter)?;
+    
+    assert_signer(authority)?;
+    
+    // Derive PDA
+    let (spot_fee_config_pda, spot_fee_config_bump) = Pubkey::find_program_address(
+        &[SPOT_TRADING_FEE_CONFIG_SEED],
+        program_id,
+    );
+    
+    if spot_fee_config_info.key != &spot_fee_config_pda {
+        msg!("❌ Invalid SpotTradingFeeConfig PDA");
+        return Err(FundError::InvalidPDA.into());
+    }
+    
+    // Check if already initialized
+    if !spot_fee_config_info.data_is_empty() {
+        return Err(FundError::FundAlreadyInitialized.into());
+    }
+    
+    // Create SpotTradingFeeConfig account
+    let rent = Rent::get()?;
+    let space = SpotTradingFeeConfig::SIZE;
+    let lamports = rent.minimum_balance(space);
+    
+    invoke_signed(
+        &system_instruction::create_account(
+            authority.key,
+            spot_fee_config_info.key,
+            lamports,
+            space as u64,
+            program_id,
+        ),
+        &[authority.clone(), spot_fee_config_info.clone(), system_program.clone()],
+        &[&[SPOT_TRADING_FEE_CONFIG_SEED, &[spot_fee_config_bump]]],
+    )?;
+    
+    // Create Spot Fee Vault PDA (token account)
+    let (spot_fee_vault_pda, spot_fee_vault_bump) = Pubkey::find_program_address(
+        &[SPOT_FEE_VAULT_SEED],
+        program_id,
+    );
+    
+    if spot_fee_vault_info.key != &spot_fee_vault_pda {
+        msg!("❌ Invalid Spot Fee Vault PDA");
+        return Err(FundError::InvalidPDA.into());
+    }
+    
+    // Create token account for vault
+    let vault_rent = rent.minimum_balance(spl_token::state::Account::LEN);
+    invoke_signed(
+        &system_instruction::create_account(
+            authority.key,
+            spot_fee_vault_info.key,
+            vault_rent,
+            spl_token::state::Account::LEN as u64,
+            &spl_token::id(),
+        ),
+        &[authority.clone(), spot_fee_vault_info.clone(), system_program.clone()],
+        &[&[SPOT_FEE_VAULT_SEED, &[spot_fee_vault_bump]]],
+    )?;
+    
+    // Initialize token account
+    invoke(
+        &spl_token::instruction::initialize_account(
+            token_program.key,
+            spot_fee_vault_info.key,
+            usdc_mint.key,
+            spot_fee_config_info.key, // Config PDA is the authority
+        )?,
+        &[
+            spot_fee_vault_info.clone(),
+            usdc_mint.clone(),
+            spot_fee_config_info.clone(),
+            token_program.clone(),
+        ],
+    )?;
+    
+    // Initialize config
+    let current_ts = Clock::get()?.unix_timestamp;
+    let spot_fee_config = SpotTradingFeeConfig::new(
+        *spot_fee_vault_info.key,
+        spot_fee_config_bump,
+        args.authorized_caller,
+        *authority.key,
+        current_ts,
+    );
+    
+    spot_fee_config.serialize(&mut *spot_fee_config_info.data.borrow_mut())?;
+    
+    msg!("✅ SpotTradingFeeConfig initialized");
+    msg!("  Vault: {}", spot_fee_vault_info.key);
+    msg!("  Authorized Caller: {}", args.authorized_caller);
+    
+    Ok(())
+}
+
+/// 收取 Spot 交易手续费
+fn process_collect_spot_trading_fee(
+    _program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: CollectSpotTradingFeeArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let caller = next_account_info(account_info_iter)?;
+    let spot_fee_config_info = next_account_info(account_info_iter)?;
+    let _spot_fee_vault = next_account_info(account_info_iter)?;
+    let _source_token_account = next_account_info(account_info_iter)?;
+    let _token_program = next_account_info(account_info_iter)?;
+    
+    assert_signer(caller)?;
+    
+    let mut config = SpotTradingFeeConfig::try_from_slice(&spot_fee_config_info.data.borrow())?;
+    
+    if config.discriminator != SPOT_TRADING_FEE_CONFIG_DISCRIMINATOR {
+        return Err(FundError::FundNotInitialized.into());
+    }
+    
+    // Verify caller is authorized
+    if !config.is_authorized_caller(caller.key) {
+        msg!("❌ Unauthorized caller for SpotTradingFeeConfig");
+        return Err(FundError::UnauthorizedCaller.into());
+    }
+    
+    if config.is_paused {
+        return Err(FundError::FundPaused.into());
+    }
+    
+    // Calculate fee
+    let fee_e6 = if args.is_taker {
+        config.calculate_taker_fee(args.volume_e6)
+    } else {
+        config.calculate_maker_fee(args.volume_e6)
+    };
+    
+    // Record fee
+    let current_ts = Clock::get()?.unix_timestamp;
+    if args.is_taker {
+        config.record_taker_fee(fee_e6, current_ts);
+    } else {
+        config.record_maker_fee(fee_e6, current_ts);
+    }
+    
+    config.serialize(&mut *spot_fee_config_info.data.borrow_mut())?;
+    
+    msg!("✅ SpotTradingFee collected: volume={}, fee={}, is_taker={}", 
+         args.volume_e6, fee_e6, args.is_taker);
+    
+    Ok(())
+}
+
+/// 分配 Spot 手续费
+fn process_distribute_spot_fee(
+    _program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: DistributeSpotFeeArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let authority = next_account_info(account_info_iter)?;
+    let spot_fee_config_info = next_account_info(account_info_iter)?;
+    let _spot_fee_vault = next_account_info(account_info_iter)?;
+    let _insurance_fund_vault = next_account_info(account_info_iter)?;
+    let _token_program = next_account_info(account_info_iter)?;
+    
+    assert_signer(authority)?;
+    
+    let config = SpotTradingFeeConfig::try_from_slice(&spot_fee_config_info.data.borrow())?;
+    
+    if config.discriminator != SPOT_TRADING_FEE_CONFIG_DISCRIMINATOR {
+        return Err(FundError::FundNotInitialized.into());
+    }
+    
+    if config.authority != *authority.key {
+        return Err(FundError::AdminRequired.into());
+    }
+    
+    let (protocol, insurance, referral, maker) = config.distribute_fee(args.amount_e6);
+    
+    msg!("✅ SpotFee distributed: total={}", args.amount_e6);
+    msg!("  Protocol: {}", protocol);
+    msg!("  Insurance: {}", insurance);
+    msg!("  Referral: {}", referral);
+    msg!("  Maker: {}", maker);
+    
+    // TODO: Implement actual token transfers
+    
+    Ok(())
+}
+
+/// 发放 Spot 做市商奖励
+fn process_distribute_spot_maker_reward(
+    _program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: DistributeSpotMakerRewardArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let authority = next_account_info(account_info_iter)?;
+    let spot_fee_config_info = next_account_info(account_info_iter)?;
+    let _spot_fee_vault = next_account_info(account_info_iter)?;
+    let _maker_token_account = next_account_info(account_info_iter)?;
+    let _token_program = next_account_info(account_info_iter)?;
+    
+    assert_signer(authority)?;
+    
+    let mut config = SpotTradingFeeConfig::try_from_slice(&spot_fee_config_info.data.borrow())?;
+    
+    if config.authority != *authority.key {
+        return Err(FundError::AdminRequired.into());
+    }
+    
+    let current_ts = Clock::get()?.unix_timestamp;
+    config.record_maker_reward(args.reward_e6, current_ts);
+    config.serialize(&mut *spot_fee_config_info.data.borrow_mut())?;
+    
+    msg!("✅ SpotMakerReward distributed: maker={}, amount={}", args.maker, args.reward_e6);
+    
+    // TODO: Implement actual token transfer
+    
+    Ok(())
+}
+
+/// 更新 Spot 手续费配置
+fn process_update_spot_fee_config(
+    _program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: UpdateSpotTradingFeeConfigArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let authority = next_account_info(account_info_iter)?;
+    let spot_fee_config_info = next_account_info(account_info_iter)?;
+    
+    assert_signer(authority)?;
+    
+    let mut config = SpotTradingFeeConfig::try_from_slice(&spot_fee_config_info.data.borrow())?;
+    
+    if config.discriminator != SPOT_TRADING_FEE_CONFIG_DISCRIMINATOR {
+        return Err(FundError::FundNotInitialized.into());
+    }
+    
+    if config.authority != *authority.key {
+        return Err(FundError::AdminRequired.into());
+    }
+    
+    // Update fields if provided
+    if let Some(v) = args.taker_fee_bps { config.taker_fee_bps = v; }
+    if let Some(v) = args.maker_fee_bps { config.maker_fee_bps = v; }
+    if let Some(v) = args.protocol_share_bps { config.protocol_share_bps = v; }
+    if let Some(v) = args.insurance_share_bps { config.insurance_share_bps = v; }
+    if let Some(v) = args.referral_share_bps { config.referral_share_bps = v; }
+    if let Some(v) = args.maker_reward_share_bps { config.maker_reward_share_bps = v; }
+    
+    config.last_update_ts = Clock::get()?.unix_timestamp;
+    config.serialize(&mut *spot_fee_config_info.data.borrow_mut())?;
+    
+    msg!("✅ SpotTradingFeeConfig updated");
+    msg!("  Taker fee: {} bps", config.taker_fee_bps);
+    msg!("  Maker fee: {} bps", config.maker_fee_bps);
     
     Ok(())
 }

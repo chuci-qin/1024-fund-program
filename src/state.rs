@@ -1893,6 +1893,219 @@ impl PredictionMarketFeeConfig {
     }
 }
 
+// =============================================================================
+// Spot Trading Fee Config (Phase 2/3)
+// =============================================================================
+
+/// Discriminator for SpotTradingFeeConfig account
+pub const SPOT_TRADING_FEE_CONFIG_DISCRIMINATOR: u64 = 0x53505F4645455F43; // "SP_FEE_C"
+
+/// Seed prefix for SpotTradingFeeConfig PDA
+pub const SPOT_TRADING_FEE_CONFIG_SEED: &[u8] = b"spot_trading_fee_config";
+
+/// Seed prefix for Spot Fee Vault PDA
+pub const SPOT_FEE_VAULT_SEED: &[u8] = b"spot_fee_vault";
+
+/// Spot 交易手续费配置账户
+/// 
+/// 管理 Spot 交易的手续费收取和分配
+/// 
+/// PDA Seeds: ["spot_trading_fee_config"]
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct SpotTradingFeeConfig {
+    /// 账户类型标识符
+    pub discriminator: u64,
+    
+    /// Spot 手续费资金池 (Token Account，按 quote token 收取)
+    pub spot_fee_vault: Pubkey,
+    
+    /// PDA bump
+    pub bump: u8,
+    
+    // === Spot 费率配置 (basis points, 10000 = 100%) ===
+    
+    /// Taker 交易费率 (默认 20 = 0.2%)
+    pub taker_fee_bps: u16,
+    
+    /// Maker 交易费率 (默认 5 = 0.05%)
+    pub maker_fee_bps: u16,
+    
+    // === 费用分配比例 (basis points, 总计 10000) ===
+    
+    /// 协议收入占比 (默认 6000 = 60%)
+    pub protocol_share_bps: u16,
+    
+    /// 保险基金占比 (默认 2000 = 20%)
+    pub insurance_share_bps: u16,
+    
+    /// 返佣池占比 (默认 1500 = 15%)
+    pub referral_share_bps: u16,
+    
+    /// 做市商激励占比 (默认 500 = 5%)
+    pub maker_reward_share_bps: u16,
+    
+    // === 累计统计 (e6) ===
+    
+    /// 累计 Taker 手续费
+    pub total_taker_fee_e6: i64,
+    
+    /// 累计 Maker 手续费
+    pub total_maker_fee_e6: i64,
+    
+    /// 累计协议收入
+    pub total_protocol_income_e6: i64,
+    
+    /// 累计保险基金转入
+    pub total_insurance_income_e6: i64,
+    
+    /// 累计返佣发放
+    pub total_referral_paid_e6: i64,
+    
+    /// 累计做市商奖励
+    pub total_maker_rewards_e6: i64,
+    
+    // === 管理 ===
+    
+    /// 授权调用方 (通常是 Vault Program 或 Ledger Program)
+    pub authorized_caller: Pubkey,
+    
+    /// 管理员
+    pub authority: Pubkey,
+    
+    /// 是否暂停
+    pub is_paused: bool,
+    
+    /// 最后更新时间
+    pub last_update_ts: i64,
+    
+    /// 预留字段
+    pub reserved: [u8; 64],
+}
+
+impl SpotTradingFeeConfig {
+    /// 账户大小
+    pub const SIZE: usize = 8   // discriminator
+        + 32  // spot_fee_vault
+        + 1   // bump
+        + 2   // taker_fee_bps
+        + 2   // maker_fee_bps
+        + 2   // protocol_share_bps
+        + 2   // insurance_share_bps
+        + 2   // referral_share_bps
+        + 2   // maker_reward_share_bps
+        + 8   // total_taker_fee_e6
+        + 8   // total_maker_fee_e6
+        + 8   // total_protocol_income_e6
+        + 8   // total_insurance_income_e6
+        + 8   // total_referral_paid_e6
+        + 8   // total_maker_rewards_e6
+        + 32  // authorized_caller
+        + 32  // authority
+        + 1   // is_paused
+        + 8   // last_update_ts
+        + 64; // reserved
+
+    /// 创建新的 SpotTradingFeeConfig
+    pub fn new(
+        spot_fee_vault: Pubkey,
+        bump: u8,
+        authorized_caller: Pubkey,
+        authority: Pubkey,
+        created_at: i64,
+    ) -> Self {
+        Self {
+            discriminator: SPOT_TRADING_FEE_CONFIG_DISCRIMINATOR,
+            spot_fee_vault,
+            bump,
+            // 默认费率
+            taker_fee_bps: 20,      // 0.2%
+            maker_fee_bps: 5,       // 0.05%
+            // 默认分配比例
+            protocol_share_bps: 6000,     // 60%
+            insurance_share_bps: 2000,    // 20%
+            referral_share_bps: 1500,     // 15%
+            maker_reward_share_bps: 500,  // 5%
+            // 统计初始化
+            total_taker_fee_e6: 0,
+            total_maker_fee_e6: 0,
+            total_protocol_income_e6: 0,
+            total_insurance_income_e6: 0,
+            total_referral_paid_e6: 0,
+            total_maker_rewards_e6: 0,
+            authorized_caller,
+            authority,
+            is_paused: false,
+            last_update_ts: created_at,
+            reserved: [0u8; 64],
+        }
+    }
+
+    /// PDA seeds
+    pub fn seeds() -> Vec<Vec<u8>> {
+        vec![SPOT_TRADING_FEE_CONFIG_SEED.to_vec()]
+    }
+
+    /// 验证调用方是否授权
+    pub fn is_authorized_caller(&self, caller: &Pubkey) -> bool {
+        caller == &self.authorized_caller
+    }
+
+    /// 计算 Taker 手续费
+    pub fn calculate_taker_fee(&self, volume_e6: i64) -> i64 {
+        (volume_e6 as i128 * self.taker_fee_bps as i128 / 10000) as i64
+    }
+
+    /// 计算 Maker 手续费
+    pub fn calculate_maker_fee(&self, volume_e6: i64) -> i64 {
+        (volume_e6 as i128 * self.maker_fee_bps as i128 / 10000) as i64
+    }
+
+    /// 分配手续费
+    /// 返回 (protocol, insurance, referral, maker_reward)
+    pub fn distribute_fee(&self, fee_e6: i64) -> (i64, i64, i64, i64) {
+        let protocol = (fee_e6 as i128 * self.protocol_share_bps as i128 / 10000) as i64;
+        let insurance = (fee_e6 as i128 * self.insurance_share_bps as i128 / 10000) as i64;
+        let referral = (fee_e6 as i128 * self.referral_share_bps as i128 / 10000) as i64;
+        let maker = (fee_e6 as i128 * self.maker_reward_share_bps as i128 / 10000) as i64;
+        (protocol, insurance, referral, maker)
+    }
+
+    /// 记录 Taker 手续费
+    pub fn record_taker_fee(&mut self, fee_e6: i64, current_ts: i64) {
+        self.total_taker_fee_e6 = self.total_taker_fee_e6.saturating_add(fee_e6);
+        let (protocol, insurance, _referral, _maker) = self.distribute_fee(fee_e6);
+        self.total_protocol_income_e6 = self.total_protocol_income_e6.saturating_add(protocol);
+        self.total_insurance_income_e6 = self.total_insurance_income_e6.saturating_add(insurance);
+        self.last_update_ts = current_ts;
+    }
+
+    /// 记录 Maker 手续费
+    pub fn record_maker_fee(&mut self, fee_e6: i64, current_ts: i64) {
+        self.total_maker_fee_e6 = self.total_maker_fee_e6.saturating_add(fee_e6);
+        let (protocol, insurance, _referral, _maker) = self.distribute_fee(fee_e6);
+        self.total_protocol_income_e6 = self.total_protocol_income_e6.saturating_add(protocol);
+        self.total_insurance_income_e6 = self.total_insurance_income_e6.saturating_add(insurance);
+        self.last_update_ts = current_ts;
+    }
+
+    /// 记录返佣发放
+    pub fn record_referral_paid(&mut self, amount_e6: i64, current_ts: i64) {
+        self.total_referral_paid_e6 = self.total_referral_paid_e6.saturating_add(amount_e6);
+        self.last_update_ts = current_ts;
+    }
+
+    /// 记录做市商奖励
+    pub fn record_maker_reward(&mut self, reward_e6: i64, current_ts: i64) {
+        self.total_maker_rewards_e6 = self.total_maker_rewards_e6.saturating_add(reward_e6);
+        self.last_update_ts = current_ts;
+    }
+
+    /// 获取总手续费收入
+    pub fn total_fee_income_e6(&self) -> i64 {
+        self.total_taker_fee_e6.saturating_add(self.total_maker_fee_e6)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
