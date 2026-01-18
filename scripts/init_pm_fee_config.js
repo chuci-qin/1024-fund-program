@@ -20,6 +20,7 @@ const {
   sendAndConfirmTransaction,
   SYSVAR_RENT_PUBKEY,
 } = require('@solana/web3.js');
+const config = require('./config');
 const { TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, getAssociatedTokenAddress } = require('@solana/spl-token');
 const fs = require('fs');
 
@@ -28,9 +29,9 @@ const fs = require('fs');
 // ============================================================================
 
 // Program IDs (1024Chain Testnet)
-const FUND_PROGRAM_ID = new PublicKey('FPhDzu7yCDC1BBvzGwpM6dHHNQBPpKEv6Y3Ptdc7o3fJ');
-const PM_PROGRAM_ID = new PublicKey('FVtPQkdYvSNdpTA6QXYRcTBhDGgnufw2Enqmo2tQKr58');
-const USDC_MINT = new PublicKey('7pCrfxhcAEyTFDhrhKRtRS2iMvEYx2dtNE7NzwuU7SA9');
+const FUND_PROGRAM_ID = config.FUND_PROGRAM_ID;
+const PM_PROGRAM_ID = config.PM_PROGRAM_ID;
+const USDC_MINT = config.USDC_MINT;
 
 // PDA Seeds
 const PM_FEE_CONFIG_SEED = Buffer.from('prediction_market_fee_config');

@@ -23,10 +23,11 @@ const {
   TransactionInstruction,
   sendAndConfirmTransaction,
 } = require('@solana/web3.js');
+const config = require('./config');
 const fs = require('fs');
 
 // Configuration
-const FUND_PROGRAM_ID = new PublicKey('FPhDzu7yCDC1BBvzGwpM6dHHNQBPpKEv6Y3Ptdc7o3fJ');
+const FUND_PROGRAM_ID = config.FUND_PROGRAM_ID;
 const PM_FEE_CONFIG_SEED = Buffer.from('prediction_market_fee_config');
 const FUND_IX_UPDATE_PM_FEE_CONFIG = 46;
 
