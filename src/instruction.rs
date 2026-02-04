@@ -539,6 +539,59 @@ pub enum FundInstruction {
     /// 0. `[signer]` Authority
     /// 1. `[writable]` SpotTradingFeeConfig
     UpdateSpotTradingFeeConfig(UpdateSpotTradingFeeConfigArgs),
+
+    // =========================================================================
+    // Perp Trading Fee Operations (160-179)
+    // =========================================================================
+
+    /// 初始化 Perp 交易手续费配置
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Authority (admin)
+    /// 1. `[writable]` PerpTradingFeeConfig PDA
+    /// 2. `[writable]` Perp Fee Vault PDA (Token Account)
+    /// 3. `[]` USDC Mint
+    /// 4. `[]` Ledger Program (authorized caller)
+    /// 5. `[]` Token Program
+    /// 6. `[]` System Program
+    InitializePerpTradingFeeConfig(InitializePerpTradingFeeConfigArgs),
+
+    /// 收取 Perp 交易手续费 (CPI from Ledger)
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Caller Program
+    /// 1. `[writable]` PerpTradingFeeConfig
+    /// 2. `[writable]` Perp Fee Vault
+    /// 3. `[writable]` Source Token Account
+    /// 4. `[]` Token Program
+    CollectPerpTradingFee(CollectPerpTradingFeeArgs),
+
+    /// 分配 Perp 手续费到各池
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Authority or Relayer
+    /// 1. `[writable]` PerpTradingFeeConfig
+    /// 2. `[writable]` Perp Fee Vault
+    /// 3. `[writable]` Insurance Fund Vault
+    /// 4. `[]` Token Program
+    DistributePerpFee(DistributePerpFeeArgs),
+
+    /// 发放 Perp 做市商奖励
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Authority
+    /// 1. `[writable]` PerpTradingFeeConfig
+    /// 2. `[writable]` Perp Fee Vault
+    /// 3. `[writable]` Maker's Token Account
+    /// 4. `[]` Token Program
+    DistributePerpMakerReward(DistributePerpMakerRewardArgs),
+
+    /// 更新 Perp 手续费配置
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Authority
+    /// 1. `[writable]` PerpTradingFeeConfig
+    UpdatePerpTradingFeeConfig(UpdatePerpTradingFeeConfigArgs),
 }
 
 // === Argument Structs ===
@@ -1004,6 +1057,59 @@ pub struct DistributeSpotMakerRewardArgs {
 /// 更新 Spot 手续费配置
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
 pub struct UpdateSpotTradingFeeConfigArgs {
+    /// Taker 费率 (bps)
+    pub taker_fee_bps: Option<u16>,
+    /// Maker 费率 (bps)
+    pub maker_fee_bps: Option<u16>,
+    /// 协议收入占比 (bps)
+    pub protocol_share_bps: Option<u16>,
+    /// 保险基金占比 (bps)
+    pub insurance_share_bps: Option<u16>,
+    /// 返佣池占比 (bps)
+    pub referral_share_bps: Option<u16>,
+    /// 做市商激励占比 (bps)
+    pub maker_reward_share_bps: Option<u16>,
+}
+
+// ============================================================================
+// Perp Trading Fee Arguments
+// ============================================================================
+
+/// 初始化 Perp 交易手续费配置
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct InitializePerpTradingFeeConfigArgs {
+    /// 授权调用方 (Ledger Program)
+    pub authorized_caller: Pubkey,
+}
+
+/// 收取 Perp 交易手续费
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct CollectPerpTradingFeeArgs {
+    /// 交易金额 (e6)
+    pub volume_e6: i64,
+    /// 是否为 Taker
+    pub is_taker: bool,
+}
+
+/// 分配 Perp 手续费
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct DistributePerpFeeArgs {
+    /// 要分配的金额 (e6), 0 = 分配全部余额
+    pub amount_e6: i64,
+}
+
+/// 发放 Perp 做市商奖励
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct DistributePerpMakerRewardArgs {
+    /// 做市商地址
+    pub maker: Pubkey,
+    /// 奖励金额 (e6)
+    pub reward_e6: i64,
+}
+
+/// 更新 Perp 手续费配置
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct UpdatePerpTradingFeeConfigArgs {
     /// Taker 费率 (bps)
     pub taker_fee_bps: Option<u16>,
     /// Maker 费率 (bps)

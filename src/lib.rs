@@ -46,6 +46,7 @@ pub mod error;
 pub mod instruction;
 pub mod processor;
 pub mod state;
+pub mod token_compat;
 pub mod utils;
 
 #[cfg(not(feature = "no-entrypoint"))]

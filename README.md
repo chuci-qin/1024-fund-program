@@ -279,7 +279,80 @@ pub struct ReferralBinding {
 }
 ```
 
-### 6. PredictionMarketFeeConfig (预测市场手续费配置)
+### 6. PerpTradingFeeConfig (Perp 交易手续费配置) 🆕
+
+**PDA Seeds:** `["perp_trading_fee_config"]`
+
+> Perp 永续合约交易手续费管理
+
+```rust
+pub struct PerpTradingFeeConfig {
+    pub discriminator: u64,
+    pub perp_fee_vault: Pubkey,              // Perp 手续费池 (USDC)
+    pub bump: u8,
+    
+    // === 默认费率配置 (basis points) ===
+    pub default_taker_fee_bps: u16,          // 默认 Taker 费率 (50 = 0.05%)
+    pub default_maker_fee_bps: u16,          // 默认 Maker 费率 (20 = 0.02%)
+    
+    // === 分配比例 (总计 10000) ===
+    pub protocol_share_bps: u16,             // 协议收入 (6000 = 60%)
+    pub insurance_fund_share_bps: u16,       // 保险基金 (2000 = 20%)
+    pub referral_share_bps: u16,             // 返佣系统 (1500 = 15%)
+    pub maker_reward_share_bps: u16,         // 做市商奖励 (500 = 5%)
+    
+    // === 累计统计 ===
+    pub total_taker_fee_collected_e6: i64,   // Taker 费用总收入
+    pub total_maker_fee_collected_e6: i64,   // Maker 费用总收入
+    pub total_protocol_income_e6: i64,       // 协议净收入
+    pub total_insurance_fund_income_e6: i64, // 保险基金收入
+    pub total_referral_rewards_e6: i64,      // 返佣系统收入
+    pub total_maker_rewards_e6: i64,         // 做市商奖励收入
+    
+    // === 管理 ===
+    pub authorized_caller: Pubkey,           // Ledger Program
+    pub authority: Pubkey,
+    pub is_paused: bool,
+    pub last_update_ts: i64,
+    pub reserved: [u8; 64],
+}
+```
+
+### Perp 手续费流程
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Perp 手续费完整流程                                   │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│   Step 1: 成交时收取                                                     │
+│   ├── Taker 支付 0.05% taker_fee                                        │
+│   ├── Maker 支付 0.02% maker_fee                                        │
+│   └── 总手续费 = taker_fee + maker_fee = 0.07%                          │
+│                                                                         │
+│   Step 2: 即时分配                                                       │
+│   ├── 协议收入 (60%) → 协议国库 Vault                                   │
+│   ├── 保险基金 (20%) → Insurance Fund                                   │
+│   ├── 返佣系统 (15%) → 邀请人返佣池                                     │
+│   └── 做市商奖励 (5%) → 做市商奖励池                                     │
+│                                                                         │
+│   Step 3: 返佣处理                                                       │
+│   ├── 检查 Taker 是否有 ReferralBinding                                 │
+│   ├── 有绑定: 邀请人获得 referral_pool × referrer_share                 │
+│   │          被邀请人已在 taker_fee 中获得折扣                          │
+│   └── 无绑定: 返佣部分回流协议                                          │
+│                                                                         │
+│   Step 4: 做市商奖励 (每日结算)                                          │
+│   ├── 累计每日做市商贡献 (成交量/深度/在线时长)                         │
+│   ├── 按权重分配做市商奖励池                                            │
+│   └── 发放到做市商 Vault UserAccount                                    │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### 7. PredictionMarketFeeConfig (预测市场手续费配置)
 
 **PDA Seeds:** `["prediction_market_fee_config"]`
 
@@ -317,7 +390,7 @@ pub struct PredictionMarketFeeConfig {
 }
 ```
 
-### 7. SpotTradingFeeConfig (Spot 交易手续费配置) 🆕
+### 8. SpotTradingFeeConfig (Spot 交易手续费配置) 🆕
 
 **PDA Seeds:** `["spot_trading_fee_config"]`
 
@@ -423,6 +496,8 @@ pub struct TokenFeeStats {
 | `Initialize` | 初始化 FundConfig |
 | `InitializeInsuranceFund` | 初始化保险基金 |
 | `InitializeReferral` | 初始化返佣系统 |
+| `InitializePerpTradingFeeConfig` | 初始化 Perp 手续费配置 🆕 |
+| `InitializeSpotTradingFeeConfig` | 初始化 Spot 手续费配置 🆕 |
 | `InitializePredictionMarketFeeConfig` | 初始化 PM 手续费配置 |
 
 ### LP 基金指令
@@ -474,6 +549,17 @@ pub struct TokenFeeStats {
 | `UpdatePredictionMarketFeeConfig` | 更新费率配置 | Admin |
 | `SetPredictionMarketFeePaused` | 暂停/恢复 | Admin |
 
+### Perp 交易手续费指令 🆕
+
+| 指令 | 说明 | 调用者 |
+|------|------|--------|
+| `InitializePerpTradingFeeConfig` | 初始化 Perp 手续费配置 | Admin |
+| `CollectPerpTradingFee` | 收取 Perp 交易手续费 | Ledger Program (CPI) |
+| `DistributePerpFee` | 分配 Perp 手续费到各池 | Relayer / System |
+| `DistributePerpMakerReward` | 发放 Perp 做市商奖励 | Admin / Relayer |
+| `UpdatePerpTradingFeeConfig` | 更新 Perp 费率配置 | Admin |
+| `SetPerpFeePaused` | 暂停/恢复 Perp 手续费 | Admin |
+
 ### Spot 交易手续费指令 🆕
 
 | 指令 | 说明 | 调用者 |
@@ -485,6 +571,16 @@ pub struct TokenFeeStats {
 | `UpdateSpotTradingFeeConfig` | 更新 Spot 费率配置 | Admin |
 | `SetSpotFeePaused` | 暂停/恢复 Spot 手续费 | Admin |
 | `GetSpotFeeStats` | 查询 Spot 手续费统计 | Anyone (Read) |
+
+### 做市商奖励指令 🆕
+
+| 指令 | 说明 | 调用者 |
+|------|------|--------|
+| `RegisterAsMaker` | 注册为做市商 | 用户 |
+| `UpdateMakerStatus` | 更新做市商状态 | Admin |
+| `CalculateMakerRewards` | 计算 Epoch 做市商奖励 | Relayer |
+| `ClaimMakerReward` | 领取做市商奖励 | 做市商 |
+| `GetMakerStats` | 查询做市商统计 | Anyone (Read) |
 
 ### Relayer 指令
 
@@ -649,6 +745,155 @@ pub fn should_trigger_adl(&self, balance: i64, shortfall: i64) -> ADLTriggerReas
 
 ---
 
+## 做市商奖励机制 🆕
+
+### 设计目标
+
+激励做市商提供深度流动性，确保 DEX 和预测市场的交易体验接近 CEX。
+
+### 奖励来源
+
+| 来源 | 分配比例 | 说明 |
+|------|---------|------|
+| Perp 手续费 | 5% | 进入 Perp Maker Reward Pool |
+| Spot 手续费 | 5% | 进入 Spot Maker Reward Pool |
+| PM 手续费 | 20% | 进入 PM Maker Reward Pool |
+
+### 贡献权重计算
+
+每个 Epoch (24 小时) 结算一次，做市商权重由三个因素决定：
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    做市商权重计算公式                                    │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│   final_weight = volume_weight × 0.4                                    │
+│                + depth_weight × 0.4                                     │
+│                + uptime_weight × 0.2                                    │
+│                                                                         │
+│   ┌─────────────────────────────────────────────────────────────────┐  │
+│   │ 成交量权重 (Volume Weight) - 40%                                 │  │
+│   ├─────────────────────────────────────────────────────────────────┤  │
+│   │ volume_weight = maker_filled_volume / total_maker_filled_volume │  │
+│   │                                                                 │  │
+│   │ 说明: 做市商的成交量占总成交量的比例                             │  │
+│   └─────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+│   ┌─────────────────────────────────────────────────────────────────┐  │
+│   │ 流动性深度权重 (Depth Weight) - 40%                              │  │
+│   ├─────────────────────────────────────────────────────────────────┤  │
+│   │ depth_weight = avg_depth_in_bbo / total_avg_depth               │  │
+│   │                                                                 │  │
+│   │ 说明: 在 BBO (Best Bid/Offer) ±1% 范围内的平均挂单量占比        │  │
+│   │       鼓励在接近市价的位置提供流动性                             │  │
+│   └─────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+│   ┌─────────────────────────────────────────────────────────────────┐  │
+│   │ 在线时长权重 (Uptime Weight) - 20%                               │  │
+│   ├─────────────────────────────────────────────────────────────────┤  │
+│   │ uptime_weight = active_quoting_time / epoch_duration            │  │
+│   │                                                                 │  │
+│   │ 说明: 做市商订单存在时间 / Epoch 总时长                          │  │
+│   │       鼓励持续提供流动性                                         │  │
+│   └─────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 奖励分配流程
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    做市商奖励分配流程                                    │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│   每日 UTC 00:00 由 Relayer 自动触发:                                   │
+│                                                                         │
+│   Step 1: 收集上一 Epoch 数据                                           │
+│   ├── 从 Ledger 获取所有 Maker 成交记录                                 │
+│   ├── 从订单簿快照获取深度数据                                          │
+│   └── 从订单日志获取在线时长数据                                        │
+│                                                                         │
+│   Step 2: 计算各做市商权重                                              │
+│   ├── 计算 volume_weight                                                │
+│   ├── 计算 depth_weight                                                 │
+│   └── 计算 uptime_weight                                                │
+│                                                                         │
+│   Step 3: 分配奖励                                                      │
+│   ├── maker_A_reward = pool_total × (A_weight / Σ weights)              │
+│   └── 写入 MakerRewardRecord PDA                                        │
+│                                                                         │
+│   Step 4: 做市商领取                                                    │
+│   ├── 做市商调用 ClaimMakerReward                                       │
+│   └── 奖励直接存入 Vault UserAccount.available_balance                  │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 做市商资格要求
+
+| 要求 | 阈值 | 说明 |
+|------|------|------|
+| 最低质押 | 1,000 USDC | 作为行为保证金 |
+| 最低日成交量 | $10,000 | 需要实际产生交易 |
+| 最低在线时长 | 80% | 每日 19.2 小时 |
+| KYC | 可选 | 高等级做市商需要 |
+
+### 违规处罚
+
+| 违规行为 | 处罚 |
+|---------|------|
+| 连续 3 天不满足最低要求 | 警告通知 |
+| 连续 7 天不满足最低要求 | 暂停做市商资格 |
+| 恶意操纵价格 | 没收保证金 + 永久禁止 |
+| 洗盘交易 | 没收该 Epoch 奖励 + 警告 |
+
+### MakerRewardRecord 账户结构
+
+**PDA Seeds:** `["maker_reward", market_type, epoch.to_le_bytes()]`
+
+```rust
+pub struct MakerRewardRecord {
+    pub discriminator: u64,
+    pub market_type: MarketType,         // Perp / Spot / PM
+    pub epoch: u64,                      // Epoch 编号 (天数)
+    pub epoch_start_ts: i64,             // Epoch 开始时间
+    pub epoch_end_ts: i64,               // Epoch 结束时间
+    
+    // 奖励池
+    pub total_pool_e6: i64,              // 该 Epoch 奖励池总额
+    pub distributed_e6: i64,             // 已分配金额
+    
+    // 做市商列表 (最多 100 个)
+    pub maker_count: u16,
+    pub makers: [MakerRewardEntry; 100],
+    
+    pub is_finalized: bool,              // 是否已完成分配
+    pub created_at: i64,
+    pub bump: u8,
+}
+
+pub struct MakerRewardEntry {
+    pub maker: Pubkey,                   // 做市商地址
+    pub volume_weight_e6: u32,           // 成交量权重 (e6)
+    pub depth_weight_e6: u32,            // 深度权重 (e6)
+    pub uptime_weight_e6: u32,           // 在线时长权重 (e6)
+    pub final_weight_e6: u32,            // 最终权重 (e6)
+    pub reward_e6: i64,                  // 分配的奖励 (e6)
+    pub claimed: bool,                   // 是否已领取
+    pub claimed_at: i64,                 // 领取时间
+}
+
+pub enum MarketType {
+    Perp = 0,
+    Spot = 1,
+    PredictionMarket = 2,
+}
+```
+
+---
+
 ## PDA 地址推导
 
 ### TypeScript 示例
@@ -715,9 +960,31 @@ const [referralBindingPDA] = await PublicKey.findProgramAddress(
     FUND_PROGRAM_ID
 );
 
+// Perp Trading Fee Config PDA
+const [perpFeeConfigPDA] = await PublicKey.findProgramAddress(
+    [Buffer.from("perp_trading_fee_config")],
+    FUND_PROGRAM_ID
+);
+
+// Spot Trading Fee Config PDA
+const [spotFeeConfigPDA] = await PublicKey.findProgramAddress(
+    [Buffer.from("spot_trading_fee_config")],
+    FUND_PROGRAM_ID
+);
+
 // Prediction Market Fee Config PDA
 const [pmFeeConfigPDA] = await PublicKey.findProgramAddress(
     [Buffer.from("prediction_market_fee_config")],
+    FUND_PROGRAM_ID
+);
+
+// Maker Reward Record PDA (for specific epoch)
+const marketType = 0; // 0=Perp, 1=Spot, 2=PM
+const epoch = 1234n;
+const epochBuffer = Buffer.alloc(8);
+epochBuffer.writeBigUInt64LE(epoch);
+const [makerRewardPDA] = await PublicKey.findProgramAddress(
+    [Buffer.from("maker_reward"), Buffer.from([marketType]), epochBuffer],
     FUND_PROGRAM_ID
 );
 ```
@@ -830,4 +1097,18 @@ MIT
 
 ---
 
-*Last Updated: 2025-12-09*
+*Last Updated: 2025-01-28*
+
+---
+
+## 更新日志
+
+### 2025-01-28
+- 添加 `PerpTradingFeeConfig` 结构和相关指令
+- 完善 `SpotTradingFeeConfig` 文档
+- 添加完整的做市商奖励机制说明
+- 添加 `MakerRewardRecord` 账户结构
+- 更新初始化指令列表
+
+### 2025-12-09
+- 初始版本

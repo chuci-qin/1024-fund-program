@@ -20,6 +20,7 @@ use crate::{
     error::FundError,
     instruction::*,
     state::*,
+    token_compat,
     utils::*,
 };
 
@@ -139,6 +140,28 @@ pub fn process_instruction(
         FundInstruction::UpdateSpotTradingFeeConfig(args) => {
             msg!("Instruction: UpdateSpotTradingFeeConfig");
             process_update_spot_fee_config(program_id, accounts, args)
+        }
+        
+        // Perp Trading Fee Instructions
+        FundInstruction::InitializePerpTradingFeeConfig(args) => {
+            msg!("Instruction: InitializePerpTradingFeeConfig");
+            process_initialize_perp_fee_config(program_id, accounts, args)
+        }
+        FundInstruction::CollectPerpTradingFee(args) => {
+            msg!("Instruction: CollectPerpTradingFee");
+            process_collect_perp_trading_fee(program_id, accounts, args)
+        }
+        FundInstruction::DistributePerpFee(args) => {
+            msg!("Instruction: DistributePerpFee");
+            process_distribute_perp_fee(program_id, accounts, args)
+        }
+        FundInstruction::DistributePerpMakerReward(args) => {
+            msg!("Instruction: DistributePerpMakerReward");
+            process_distribute_perp_maker_reward(program_id, accounts, args)
+        }
+        FundInstruction::UpdatePerpTradingFeeConfig(args) => {
+            msg!("Instruction: UpdatePerpTradingFeeConfig");
+            process_update_perp_fee_config(program_id, accounts, args)
         }
         
         // Relayer Instructions
@@ -359,8 +382,9 @@ fn process_create_fund(
         &[&[SHARE_MINT_SEED, fund_pda.as_ref(), &[mint_bump]]],
     )?;
     
-    // Create Fund vault (token account)
-    let vault_space = spl_token::state::Account::LEN;
+    // Create Fund vault (token account) - using dynamic token program based on USDC mint owner
+    let usdc_token_program = usdc_mint.owner;
+    let vault_space = token_compat::get_token_account_size(usdc_token_program);
     let vault_lamports = rent.minimum_balance(vault_space);
     
     invoke_signed(
@@ -369,21 +393,22 @@ fn process_create_fund(
             fund_vault.key,
             vault_lamports,
             vault_space as u64,
-            &spl_token::id(),
+            usdc_token_program,
         ),
         &[manager.clone(), fund_vault.clone(), system_program.clone()],
         &[&[FUND_VAULT_SEED, fund_pda.as_ref(), &[vault_bump]]],
     )?;
     
-    // Initialize Fund vault
+    // Initialize Fund vault - use Token-2022 compatible initialization (InitializeAccount3)
+    let init_vault_ix = token_compat::create_initialize_account3_instruction(
+        usdc_token_program,
+        fund_vault.key,
+        usdc_mint.key,
+        &fund_pda, // Owner = Fund PDA
+    )?;
     invoke_signed(
-        &spl_token::instruction::initialize_account(
-            &spl_token::id(),
-            fund_vault.key,
-            usdc_mint.key,
-            &fund_pda, // Owner = Fund PDA
-        )?,
-        &[fund_vault.clone(), usdc_mint.clone(), fund_account.clone(), rent_sysvar.clone()],
+        &init_vault_ix,
+        &[fund_vault.clone(), usdc_mint.clone()],
         &[&[FUND_VAULT_SEED, fund_pda.as_ref(), &[vault_bump]]],
     )?;
     
@@ -557,23 +582,25 @@ fn process_close_fund(
         return Err(FundError::FundHasLPPositions.into());
     }
     
-    // Transfer remaining funds to manager
+    // Transfer remaining funds to manager - using dynamic token program
     let vault_account = spl_token::state::Account::unpack(&fund_vault.data.borrow())?;
     if vault_account.amount > 0 {
         let fund_seeds = Fund::seeds(manager.key, fund.fund_index);
         let fund_seeds_refs: Vec<&[u8]> = fund_seeds.iter().map(|s| s.as_slice()).collect();
         let (_, fund_bump) = Pubkey::find_program_address(&fund_seeds_refs, program_id);
         
+        // Use token_compat for dynamic token program support
+        let transfer_ix = token_compat::create_transfer_instruction(
+            token_program.key,
+            fund_vault.key,
+            manager_usdc.key,
+            fund_account.key,
+            vault_account.amount,
+        )?;
+        
         invoke_signed(
-            &spl_token::instruction::transfer(
-                &spl_token::id(),
-                fund_vault.key,
-                manager_usdc.key,
-                fund_account.key,
-                &[],
-                vault_account.amount,
-            )?,
-            &[fund_vault.clone(), manager_usdc.clone(), fund_account.clone(), token_program.clone()],
+            &transfer_ix,
+            &[fund_vault.clone(), manager_usdc.clone(), fund_account.clone()],
             &[&[FUND_SEED, manager.key.as_ref(), &fund.fund_index.to_le_bytes(), &[fund_bump]]],
         )?;
     }
@@ -1301,8 +1328,9 @@ fn process_initialize_insurance_fund(
         &[&[SHARE_MINT_SEED, fund_pda.as_ref(), &[mint_bump]]],
     )?;
     
-    // Create Fund vault (token account)
-    let vault_space = spl_token::state::Account::LEN;
+    // Create Fund vault (token account) - using dynamic token program based on USDC mint owner
+    let usdc_token_program = usdc_mint.owner;
+    let vault_space = token_compat::get_token_account_size(usdc_token_program);
     let vault_lamports = rent.minimum_balance(vault_space);
     
     invoke_signed(
@@ -1311,21 +1339,22 @@ fn process_initialize_insurance_fund(
             fund_vault.key,
             vault_lamports,
             vault_space as u64,
-            &spl_token::id(),
+            usdc_token_program,
         ),
         &[authority.clone(), fund_vault.clone(), system_program.clone()],
         &[&[FUND_VAULT_SEED, fund_pda.as_ref(), &[vault_bump]]],
     )?;
     
-    // Initialize Fund vault
+    // Initialize Fund vault - use Token-2022 compatible initialization (InitializeAccount3)
+    let init_vault_ix = token_compat::create_initialize_account3_instruction(
+        usdc_token_program,
+        fund_vault.key,
+        usdc_mint.key,
+        &fund_pda,
+    )?;
     invoke_signed(
-        &spl_token::instruction::initialize_account(
-            &spl_token::id(),
-            fund_vault.key,
-            usdc_mint.key,
-            &fund_pda,
-        )?,
-        &[fund_vault.clone(), usdc_mint.clone(), fund_account.clone(), rent_sysvar.clone()],
+        &init_vault_ix,
+        &[fund_vault.clone(), usdc_mint.clone()],
         &[&[FUND_VAULT_SEED, fund_pda.as_ref(), &[vault_bump]]],
     )?;
     
@@ -2665,8 +2694,9 @@ fn process_initialize_pm_fee_config(
         &[&[PREDICTION_MARKET_FEE_CONFIG_SEED, &[config_bump]]],
     )?;
     
-    // Create Fee Vault token account
-    let vault_space = spl_token::state::Account::LEN;
+    // Create Fee Vault token account - using dynamic token program based on USDC mint owner
+    let usdc_token_program = usdc_mint.owner;
+    let vault_space = token_compat::get_token_account_size(usdc_token_program);
     let vault_lamports = rent.minimum_balance(vault_space);
     
     invoke_signed(
@@ -2675,21 +2705,22 @@ fn process_initialize_pm_fee_config(
             pm_fee_vault.key,
             vault_lamports,
             vault_space as u64,
-            &spl_token::id(),
+            usdc_token_program,
         ),
         &[authority.clone(), pm_fee_vault.clone(), system_program.clone()],
         &[&[PREDICTION_MARKET_FEE_VAULT_SEED, &[vault_bump]]],
     )?;
     
-    // Initialize Fee Vault as token account
+    // Initialize Fee Vault as token account - use Token-2022 compatible initialization (InitializeAccount3)
+    let init_vault_ix = token_compat::create_initialize_account3_instruction(
+        usdc_token_program,
+        pm_fee_vault.key,
+        usdc_mint.key,
+        &config_pda, // Owner = Config PDA
+    )?;
     invoke_signed(
-        &spl_token::instruction::initialize_account(
-            &spl_token::id(),
-            pm_fee_vault.key,
-            usdc_mint.key,
-            &config_pda, // Owner = Config PDA
-        )?,
-        &[pm_fee_vault.clone(), usdc_mint.clone(), pm_fee_config.clone(), rent_sysvar.clone()],
+        &init_vault_ix,
+        &[pm_fee_vault.clone(), usdc_mint.clone()],
         &[&[PREDICTION_MARKET_FEE_VAULT_SEED, &[vault_bump]]],
     )?;
     
@@ -3595,34 +3626,33 @@ fn process_initialize_spot_fee_config(
         return Err(FundError::InvalidPDA.into());
     }
     
-    // Create token account for vault
-    let vault_rent = rent.minimum_balance(spl_token::state::Account::LEN);
+    // Create token account for vault - using dynamic token program based on USDC mint owner
+    let usdc_token_program = usdc_mint.owner;
+    let vault_space = token_compat::get_token_account_size(usdc_token_program);
+    let vault_rent = rent.minimum_balance(vault_space);
     invoke_signed(
         &system_instruction::create_account(
             authority.key,
             spot_fee_vault_info.key,
             vault_rent,
-            spl_token::state::Account::LEN as u64,
-            &spl_token::id(),
+            vault_space as u64,
+            usdc_token_program,
         ),
         &[authority.clone(), spot_fee_vault_info.clone(), system_program.clone()],
         &[&[SPOT_FEE_VAULT_SEED, &[spot_fee_vault_bump]]],
     )?;
     
-    // Initialize token account (使用 initialize_account3，不需要 Rent sysvar)
-    invoke(
-        &spl_token::instruction::initialize_account3(
-            token_program.key,
-            spot_fee_vault_info.key,
-            usdc_mint.key,
-            spot_fee_config_info.key, // Config PDA is the authority
-        )?,
-        &[
-            spot_fee_vault_info.clone(),
-            usdc_mint.clone(),
-            spot_fee_config_info.clone(),
-            token_program.clone(),
-        ],
+    // Initialize token account - use Token-2022 compatible initialization (InitializeAccount3)
+    let init_vault_ix = token_compat::create_initialize_account3_instruction(
+        usdc_token_program,
+        spot_fee_vault_info.key,
+        usdc_mint.key,
+        spot_fee_config_info.key, // Config PDA is the authority
+    )?;
+    invoke_signed(
+        &init_vault_ix,
+        &[spot_fee_vault_info.clone(), usdc_mint.clone()],
+        &[&[SPOT_FEE_VAULT_SEED, &[spot_fee_vault_bump]]],
     )?;
     
     // Initialize config
@@ -3806,6 +3836,286 @@ fn process_update_spot_fee_config(
     config.serialize(&mut *spot_fee_config_info.data.borrow_mut())?;
     
     msg!("✅ SpotTradingFeeConfig updated");
+    msg!("  Taker fee: {} bps", config.taker_fee_bps);
+    msg!("  Maker fee: {} bps", config.maker_fee_bps);
+    
+    Ok(())
+}
+
+// =============================================================================
+// Perp Trading Fee Instructions
+// =============================================================================
+
+use crate::state::{PerpTradingFeeConfig, PERP_TRADING_FEE_CONFIG_DISCRIMINATOR, PERP_TRADING_FEE_CONFIG_SEED, PERP_FEE_VAULT_SEED};
+use crate::instruction::{
+    InitializePerpTradingFeeConfigArgs, CollectPerpTradingFeeArgs, DistributePerpFeeArgs,
+    DistributePerpMakerRewardArgs, UpdatePerpTradingFeeConfigArgs
+};
+
+/// 初始化 Perp 交易手续费配置
+fn process_initialize_perp_fee_config(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: InitializePerpTradingFeeConfigArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let authority = next_account_info(account_info_iter)?;
+    let perp_fee_config_info = next_account_info(account_info_iter)?;
+    let perp_fee_vault_info = next_account_info(account_info_iter)?;
+    let usdc_mint = next_account_info(account_info_iter)?;
+    let _authorized_caller = next_account_info(account_info_iter)?;
+    let token_program = next_account_info(account_info_iter)?;
+    let system_program = next_account_info(account_info_iter)?;
+    
+    assert_signer(authority)?;
+    
+    // Derive PDA
+    let (perp_fee_config_pda, perp_fee_config_bump) = Pubkey::find_program_address(
+        &[PERP_TRADING_FEE_CONFIG_SEED],
+        program_id,
+    );
+    
+    if perp_fee_config_info.key != &perp_fee_config_pda {
+        msg!("❌ Invalid PerpTradingFeeConfig PDA");
+        return Err(FundError::InvalidPDA.into());
+    }
+    
+    // Check if already initialized
+    if !perp_fee_config_info.data_is_empty() {
+        return Err(FundError::FundAlreadyInitialized.into());
+    }
+    
+    // Create PerpTradingFeeConfig account
+    let rent = Rent::get()?;
+    let space = PerpTradingFeeConfig::SIZE;
+    let lamports = rent.minimum_balance(space);
+    
+    invoke_signed(
+        &system_instruction::create_account(
+            authority.key,
+            perp_fee_config_info.key,
+            lamports,
+            space as u64,
+            program_id,
+        ),
+        &[authority.clone(), perp_fee_config_info.clone(), system_program.clone()],
+        &[&[PERP_TRADING_FEE_CONFIG_SEED, &[perp_fee_config_bump]]],
+    )?;
+    
+    // Create Perp Fee Vault PDA (token account)
+    let (perp_fee_vault_pda, perp_fee_vault_bump) = Pubkey::find_program_address(
+        &[PERP_FEE_VAULT_SEED],
+        program_id,
+    );
+    
+    if perp_fee_vault_info.key != &perp_fee_vault_pda {
+        msg!("❌ Invalid Perp Fee Vault PDA");
+        return Err(FundError::InvalidPDA.into());
+    }
+    
+    // Create token account for vault - using dynamic token program based on USDC mint owner
+    let usdc_token_program = usdc_mint.owner;
+    let vault_space = token_compat::get_token_account_size(usdc_token_program);
+    let vault_rent = rent.minimum_balance(vault_space);
+    invoke_signed(
+        &system_instruction::create_account(
+            authority.key,
+            perp_fee_vault_info.key,
+            vault_rent,
+            vault_space as u64,
+            usdc_token_program,
+        ),
+        &[authority.clone(), perp_fee_vault_info.clone(), system_program.clone()],
+        &[&[PERP_FEE_VAULT_SEED, &[perp_fee_vault_bump]]],
+    )?;
+    
+    // Initialize token account - use Token-2022 compatible initialization (InitializeAccount3)
+    let init_vault_ix = token_compat::create_initialize_account3_instruction(
+        usdc_token_program,
+        perp_fee_vault_info.key,
+        usdc_mint.key,
+        perp_fee_config_info.key, // Config PDA is the authority
+    )?;
+    invoke_signed(
+        &init_vault_ix,
+        &[perp_fee_vault_info.clone(), usdc_mint.clone()],
+        &[&[PERP_FEE_VAULT_SEED, &[perp_fee_vault_bump]]],
+    )?;
+    
+    // Initialize config
+    let current_ts = Clock::get()?.unix_timestamp;
+    let perp_fee_config = PerpTradingFeeConfig::new(
+        *perp_fee_vault_info.key,
+        perp_fee_config_bump,
+        args.authorized_caller,
+        *authority.key,
+        current_ts,
+    );
+    
+    perp_fee_config.serialize(&mut *perp_fee_config_info.data.borrow_mut())?;
+    
+    msg!("✅ PerpTradingFeeConfig initialized");
+    msg!("  Vault: {}", perp_fee_vault_info.key);
+    msg!("  Authorized Caller: {}", args.authorized_caller);
+    
+    Ok(())
+}
+
+/// 收取 Perp 交易手续费
+fn process_collect_perp_trading_fee(
+    _program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: CollectPerpTradingFeeArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let caller = next_account_info(account_info_iter)?;
+    let perp_fee_config_info = next_account_info(account_info_iter)?;
+    
+    assert_signer(caller)?;
+    
+    let mut config = PerpTradingFeeConfig::try_from_slice(&perp_fee_config_info.data.borrow())?;
+    
+    if config.discriminator != PERP_TRADING_FEE_CONFIG_DISCRIMINATOR {
+        return Err(FundError::FundNotInitialized.into());
+    }
+    
+    if !config.is_authorized_caller(caller.key) {
+        msg!("❌ Unauthorized caller for PerpTradingFeeConfig");
+        return Err(FundError::Unauthorized.into());
+    }
+    
+    if config.is_paused {
+        return Err(FundError::FundPaused.into());
+    }
+    
+    // Calculate fee
+    let fee = if args.is_taker {
+        config.calculate_taker_fee(args.volume_e6)
+    } else {
+        config.calculate_maker_fee(args.volume_e6)
+    };
+    
+    // Record fee
+    let current_ts = Clock::get()?.unix_timestamp;
+    if args.is_taker {
+        config.record_taker_fee(fee, current_ts);
+    } else {
+        config.record_maker_fee(fee, current_ts);
+    }
+    
+    config.serialize(&mut *perp_fee_config_info.data.borrow_mut())?;
+    
+    msg!("✅ PerpTradingFee collected: volume={}, fee={}, is_taker={}", 
+         args.volume_e6, fee, args.is_taker);
+    
+    Ok(())
+}
+
+/// 分配 Perp 手续费
+fn process_distribute_perp_fee(
+    _program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: DistributePerpFeeArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let authority = next_account_info(account_info_iter)?;
+    let perp_fee_config_info = next_account_info(account_info_iter)?;
+    
+    assert_signer(authority)?;
+    
+    let config = PerpTradingFeeConfig::try_from_slice(&perp_fee_config_info.data.borrow())?;
+    
+    if config.discriminator != PERP_TRADING_FEE_CONFIG_DISCRIMINATOR {
+        return Err(FundError::FundNotInitialized.into());
+    }
+    
+    // Calculate distribution
+    let (protocol, insurance, referral, maker) = config.distribute_fee(args.amount_e6);
+    
+    msg!("✅ PerpFee distribution calculated");
+    msg!("  Protocol: {}", protocol);
+    msg!("  Insurance: {}", insurance);
+    msg!("  Referral: {}", referral);
+    msg!("  Maker: {}", maker);
+    
+    // Note: Actual token transfers would happen here via CPI
+    // For now, we just record the calculations
+    
+    Ok(())
+}
+
+/// 发放 Perp 做市商奖励
+fn process_distribute_perp_maker_reward(
+    _program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: DistributePerpMakerRewardArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let authority = next_account_info(account_info_iter)?;
+    let perp_fee_config_info = next_account_info(account_info_iter)?;
+    
+    assert_signer(authority)?;
+    
+    let mut config = PerpTradingFeeConfig::try_from_slice(&perp_fee_config_info.data.borrow())?;
+    
+    if config.discriminator != PERP_TRADING_FEE_CONFIG_DISCRIMINATOR {
+        return Err(FundError::FundNotInitialized.into());
+    }
+    
+    if config.authority != *authority.key {
+        return Err(FundError::AdminRequired.into());
+    }
+    
+    // Record reward
+    let current_ts = Clock::get()?.unix_timestamp;
+    config.record_maker_reward(args.reward_e6, current_ts);
+    
+    config.serialize(&mut *perp_fee_config_info.data.borrow_mut())?;
+    
+    msg!("✅ PerpMakerReward distributed: maker={}, reward={}", args.maker, args.reward_e6);
+    
+    Ok(())
+}
+
+/// 更新 Perp 手续费配置
+fn process_update_perp_fee_config(
+    _program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: UpdatePerpTradingFeeConfigArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let authority = next_account_info(account_info_iter)?;
+    let perp_fee_config_info = next_account_info(account_info_iter)?;
+    
+    assert_signer(authority)?;
+    
+    let mut config = PerpTradingFeeConfig::try_from_slice(&perp_fee_config_info.data.borrow())?;
+    
+    if config.discriminator != PERP_TRADING_FEE_CONFIG_DISCRIMINATOR {
+        return Err(FundError::FundNotInitialized.into());
+    }
+    
+    if config.authority != *authority.key {
+        return Err(FundError::AdminRequired.into());
+    }
+    
+    // Update fields if provided
+    if let Some(v) = args.taker_fee_bps { config.taker_fee_bps = v; }
+    if let Some(v) = args.maker_fee_bps { config.maker_fee_bps = v; }
+    if let Some(v) = args.protocol_share_bps { config.protocol_share_bps = v; }
+    if let Some(v) = args.insurance_share_bps { config.insurance_share_bps = v; }
+    if let Some(v) = args.referral_share_bps { config.referral_share_bps = v; }
+    if let Some(v) = args.maker_reward_share_bps { config.maker_reward_share_bps = v; }
+    
+    config.last_update_ts = Clock::get()?.unix_timestamp;
+    config.serialize(&mut *perp_fee_config_info.data.borrow_mut())?;
+    
+    msg!("✅ PerpTradingFeeConfig updated");
     msg!("  Taker fee: {} bps", config.taker_fee_bps);
     msg!("  Maker fee: {} bps", config.maker_fee_bps);
     
