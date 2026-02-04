@@ -664,20 +664,17 @@ fn process_deposit_to_fund(
     // Calculate shares to mint
     let shares = calculate_shares_to_mint(amount_e6, fund.stats.current_nav_e6)?;
     
-    // Transfer USDC to fund vault
-    invoke(
-        &spl_token::instruction::transfer(
-            &spl_token::id(),
-            investor_usdc.key,
-            fund_vault.key,
-            investor.key,
-            &[],
-            args.amount,
-        )?,
-        &[investor_usdc.clone(), fund_vault.clone(), investor.clone(), token_program.clone()],
+    // Transfer USDC to fund vault - 使用 token_compat 支持 Token-2022
+    token_compat::transfer(
+        token_program,
+        investor_usdc,
+        fund_vault,
+        investor,
+        args.amount,
+        None, // 投资者签名，不需要 PDA seeds
     )?;
     
-    // Mint share tokens to investor
+    // Mint share tokens to investor (Share Token 使用 Token-v1)
     let fund_seeds = Fund::seeds(&fund.manager, fund.fund_index);
     let fund_seeds_refs: Vec<&[u8]> = fund_seeds.iter().map(|s| s.as_slice()).collect();
     let (_, fund_bump) = Pubkey::find_program_address(&fund_seeds_refs, program_id);
@@ -808,7 +805,7 @@ fn process_redeem_from_fund(
     
     position.remove_shares(args.shares, redemption_value, current_ts)?;
     
-    // Burn share tokens
+    // Burn share tokens (Share Token 使用 Token-v1)
     invoke(
         &spl_token::instruction::burn(
             &spl_token::id(),
@@ -821,22 +818,19 @@ fn process_redeem_from_fund(
         &[investor_shares.clone(), share_mint.clone(), investor.clone(), token_program.clone()],
     )?;
     
-    // Transfer USDC to investor
+    // Transfer USDC to investor - 使用 token_compat 支持 Token-2022
     let fund_seeds = Fund::seeds(&fund.manager, fund.fund_index);
     let fund_seeds_refs: Vec<&[u8]> = fund_seeds.iter().map(|s| s.as_slice()).collect();
     let (_, fund_bump) = Pubkey::find_program_address(&fund_seeds_refs, program_id);
     
-    invoke_signed(
-        &spl_token::instruction::transfer(
-            &spl_token::id(),
-            fund_vault.key,
-            investor_usdc.key,
-            fund_account.key,
-            &[],
-            redemption_value as u64,
-        )?,
-        &[fund_vault.clone(), investor_usdc.clone(), fund_account.clone(), token_program.clone()],
-        &[&[FUND_SEED, fund.manager.as_ref(), &fund.fund_index.to_le_bytes(), &[fund_bump]]],
+    let signer_seeds: &[&[u8]] = &[FUND_SEED, fund.manager.as_ref(), &fund.fund_index.to_le_bytes(), &[fund_bump]];
+    token_compat::transfer(
+        token_program,
+        fund_vault,
+        investor_usdc,
+        fund_account,
+        redemption_value as u64,
+        Some(signer_seeds),
     )?;
     
     // Check if position is empty
@@ -1043,22 +1037,19 @@ fn process_collect_fees(
         return Err(FundError::NoFeesToCollect.into());
     }
     
-    // Transfer fees to manager
+    // Transfer fees to manager - 使用 token_compat 支持 Token-2022
     let fund_seeds = Fund::seeds(manager.key, fund.fund_index);
     let fund_seeds_refs: Vec<&[u8]> = fund_seeds.iter().map(|s| s.as_slice()).collect();
     let (_, fund_bump) = Pubkey::find_program_address(&fund_seeds_refs, program_id);
     
-    invoke_signed(
-        &spl_token::instruction::transfer(
-            &spl_token::id(),
-            fund_vault.key,
-            manager_usdc.key,
-            fund_account.key,
-            &[],
-            total_fee as u64,
-        )?,
-        &[fund_vault.clone(), manager_usdc.clone(), fund_account.clone(), token_program.clone()],
-        &[&[FUND_SEED, manager.key.as_ref(), &fund.fund_index.to_le_bytes(), &[fund_bump]]],
+    let fee_signer_seeds: &[&[u8]] = &[FUND_SEED, manager.key.as_ref(), &fund.fund_index.to_le_bytes(), &[fund_bump]];
+    token_compat::transfer(
+        token_program,
+        fund_vault,
+        manager_usdc,
+        fund_account,
+        total_fee as u64,
+        Some(fee_signer_seeds),
     )?;
     
     // Update fund state
@@ -1547,23 +1538,20 @@ fn process_cover_shortfall(
     let (covered, remaining) = config.cover_shortfall(args.shortfall_e6, current_balance);
     
     if covered > 0 {
-        // Transfer covered amount from insurance fund
+        // Transfer covered amount from insurance fund - 使用 token_compat 支持 Token-2022
         let fund = Fund::try_from_slice(&fund_account.data.borrow())?;
         let fund_seeds = Fund::seeds(&fund.manager, fund.fund_index);
         let fund_seeds_refs: Vec<&[u8]> = fund_seeds.iter().map(|s| s.as_slice()).collect();
         let (_, fund_bump) = Pubkey::find_program_address(&fund_seeds_refs, program_id);
         
-        invoke_signed(
-            &spl_token::instruction::transfer(
-                &spl_token::id(),
-                fund_vault.key,
-                destination.key,
-                fund_account.key,
-                &[],
-                covered as u64,
-            )?,
-            &[fund_vault.clone(), destination.clone(), fund_account.clone(), token_program.clone()],
-            &[&[FUND_SEED, fund.manager.as_ref(), &fund.fund_index.to_le_bytes(), &[fund_bump]]],
+        let cover_signer_seeds: &[&[u8]] = &[FUND_SEED, fund.manager.as_ref(), &fund.fund_index.to_le_bytes(), &[fund_bump]];
+        token_compat::transfer(
+            token_program,
+            fund_vault,
+            destination,
+            fund_account,
+            covered as u64,
+            Some(cover_signer_seeds),
         )?;
         
         // Update Fund stats (shortfall is negative PnL)
@@ -1770,24 +1758,14 @@ fn process_add_trading_fee(
         return Err(FundError::InvalidAmount.into());
     }
     
-    // Transfer tokens from Vault to Insurance Fund
-    let transfer_ix = spl_token::instruction::transfer(
-        token_program.key,
-        vault_token_account.key,
-        insurance_fund_vault.key,
-        caller.key,  // Ledger program is the authority
-        &[],
+    // Transfer tokens from Vault to Insurance Fund - 使用 token_compat 支持 Token-2022
+    token_compat::transfer(
+        token_program,
+        vault_token_account,
+        insurance_fund_vault,
+        caller,  // Ledger program is the authority
         args.fee_e6 as u64,
-    )?;
-    
-    invoke(
-        &transfer_ix,
-        &[
-            vault_token_account.clone(),
-            insurance_fund_vault.clone(),
-            caller.clone(),
-            token_program.clone(),
-        ],
+        None, // caller 已签名
     )?;
     
     // Update stats
@@ -1901,7 +1879,7 @@ fn process_redeem_from_insurance_fund(
     // Update LP position
     position.remove_shares(args.shares, redemption_value, current_ts)?;
     
-    // Burn share tokens
+    // Burn share tokens (Share Token 使用 Token-v1)
     invoke(
         &spl_token::instruction::burn(
             &spl_token::id(),
@@ -1914,22 +1892,19 @@ fn process_redeem_from_insurance_fund(
         &[investor_shares.clone(), share_mint.clone(), investor.clone(), token_program.clone()],
     )?;
     
-    // Transfer USDC to investor
+    // Transfer USDC to investor - 使用 token_compat 支持 Token-2022
     let fund_seeds = Fund::seeds(&fund.manager, fund.fund_index);
     let fund_seeds_refs: Vec<&[u8]> = fund_seeds.iter().map(|s| s.as_slice()).collect();
     let (_, fund_bump) = Pubkey::find_program_address(&fund_seeds_refs, program_id);
     
-    invoke_signed(
-        &spl_token::instruction::transfer(
-            &spl_token::id(),
-            fund_vault.key,
-            investor_usdc.key,
-            fund_account.key,
-            &[],
-            redemption_value as u64,
-        )?,
-        &[fund_vault.clone(), investor_usdc.clone(), fund_account.clone(), token_program.clone()],
-        &[&[FUND_SEED, fund.manager.as_ref(), &fund.fund_index.to_le_bytes(), &[fund_bump]]],
+    let insurance_signer_seeds: &[&[u8]] = &[FUND_SEED, fund.manager.as_ref(), &fund.fund_index.to_le_bytes(), &[fund_bump]];
+    token_compat::transfer(
+        token_program,
+        fund_vault,
+        investor_usdc,
+        fund_account,
+        redemption_value as u64,
+        Some(insurance_signer_seeds),
     )?;
     
     // Check if position is empty
@@ -2055,17 +2030,17 @@ fn process_square_payment(
     
     record.serialize(&mut *payment_record.data.borrow_mut())?;
     
-    // Transfer creator share from payer vault to creator vault
+    // Transfer creator share from payer vault to creator vault (using dynamic token program)
     if creator_amount_e6 > 0 {
+        let transfer_ix = token_compat::create_transfer_instruction(
+            token_program.key,
+            payer_vault.key,
+            creator_vault.key,
+            payer.key,
+            creator_amount_e6 as u64,
+        )?;
         invoke(
-            &spl_token::instruction::transfer(
-                &spl_token::id(),
-                payer_vault.key,
-                creator_vault.key,
-                payer.key,
-                &[],
-                creator_amount_e6 as u64,
-            )?,
+            &transfer_ix,
             &[
                 payer_vault.clone(),
                 creator_vault.clone(),
@@ -2075,17 +2050,17 @@ fn process_square_payment(
         )?;
     }
     
-    // Transfer platform share from payer vault to square fund vault
+    // Transfer platform share from payer vault to square fund vault (using dynamic token program)
     if platform_amount_e6 > 0 {
+        let transfer_ix = token_compat::create_transfer_instruction(
+            token_program.key,
+            payer_vault.key,
+            square_fund_vault.key,
+            payer.key,
+            platform_amount_e6 as u64,
+        )?;
         invoke(
-            &spl_token::instruction::transfer(
-                &spl_token::id(),
-                payer_vault.key,
-                square_fund_vault.key,
-                payer.key,
-                &[],
-                platform_amount_e6 as u64,
-            )?,
+            &transfer_ix,
             &[
                 payer_vault.clone(),
                 square_fund_vault.clone(),
@@ -2802,16 +2777,16 @@ fn process_collect_pm_minting_fee(
         return Ok(());
     }
     
-    // Transfer fee from source to vault
+    // Transfer fee from source to vault (using dynamic token program for Token-2022 compatibility)
+    let transfer_ix = token_compat::create_transfer_instruction(
+        token_program.key,  // Dynamic: Token-v1 or Token-2022
+        source_token_account.key,
+        pm_fee_vault.key,
+        caller.key,  // PM Program is the authority
+        fee_e6 as u64,
+    )?;
     invoke(
-        &spl_token::instruction::transfer(
-            &spl_token::id(),
-            source_token_account.key,
-            pm_fee_vault.key,
-            caller.key,  // PM Program is the authority
-            &[],
-            fee_e6 as u64,
-        )?,
+        &transfer_ix,
         &[
             source_token_account.clone(),
             pm_fee_vault.clone(),
@@ -2873,16 +2848,16 @@ fn process_collect_pm_redemption_fee(
         return Ok(());
     }
     
-    // Transfer fee
+    // Transfer fee (using dynamic token program for Token-2022 compatibility)
+    let transfer_ix = token_compat::create_transfer_instruction(
+        token_program.key,
+        source_token_account.key,
+        pm_fee_vault.key,
+        caller.key,
+        fee_e6 as u64,
+    )?;
     invoke(
-        &spl_token::instruction::transfer(
-            &spl_token::id(),
-            source_token_account.key,
-            pm_fee_vault.key,
-            caller.key,
-            &[],
-            fee_e6 as u64,
-        )?,
+        &transfer_ix,
         &[
             source_token_account.clone(),
             pm_fee_vault.clone(),
@@ -2947,16 +2922,16 @@ fn process_collect_pm_trading_fee(
         return Ok(());
     }
     
-    // Transfer fee
+    // Transfer fee (using dynamic token program for Token-2022 compatibility)
+    let transfer_ix = token_compat::create_transfer_instruction(
+        token_program.key,
+        source_token_account.key,
+        pm_fee_vault.key,
+        caller.key,
+        fee_e6 as u64,
+    )?;
     invoke(
-        &spl_token::instruction::transfer(
-            &spl_token::id(),
-            source_token_account.key,
-            pm_fee_vault.key,
-            caller.key,
-            &[],
-            fee_e6 as u64,
-        )?,
+        &transfer_ix,
         &[
             source_token_account.clone(),
             pm_fee_vault.clone(),
@@ -3031,21 +3006,21 @@ fn process_distribute_pm_maker_reward(
         return Err(FundError::InsufficientBalance.into());
     }
     
-    // Transfer reward from vault to maker (using PDA signature)
+    // Transfer reward from vault to maker (using PDA signature and dynamic token program)
     let (_, config_bump) = Pubkey::find_program_address(
         &[PREDICTION_MARKET_FEE_CONFIG_SEED],
         program_id,
     );
     
+    let transfer_ix = token_compat::create_transfer_instruction(
+        token_program.key,  // Dynamic: Token-v1 or Token-2022
+        pm_fee_vault.key,
+        maker_token_account.key,
+        pm_fee_config.key,  // Config PDA is vault owner
+        reward_e6 as u64,
+    )?;
     invoke_signed(
-        &spl_token::instruction::transfer(
-            &spl_token::id(),
-            pm_fee_vault.key,
-            maker_token_account.key,
-            pm_fee_config.key,  // Config PDA is vault owner
-            &[],
-            reward_e6 as u64,
-        )?,
+        &transfer_ix,
         &[
             pm_fee_vault.clone(),
             maker_token_account.clone(),
@@ -3123,21 +3098,21 @@ fn process_distribute_pm_creator_reward(
         return Err(FundError::InsufficientBalance.into());
     }
     
-    // Transfer reward from vault to creator
+    // Transfer reward from vault to creator (using dynamic token program)
     let (_, config_bump) = Pubkey::find_program_address(
         &[PREDICTION_MARKET_FEE_CONFIG_SEED],
         program_id,
     );
     
+    let transfer_ix = token_compat::create_transfer_instruction(
+        token_program.key,  // Dynamic: Token-v1 or Token-2022
+        pm_fee_vault.key,
+        creator_token_account.key,
+        pm_fee_config.key,
+        reward_e6 as u64,
+    )?;
     invoke_signed(
-        &spl_token::instruction::transfer(
-            &spl_token::id(),
-            pm_fee_vault.key,
-            creator_token_account.key,
-            pm_fee_config.key,
-            &[],
-            reward_e6 as u64,
-        )?,
+        &transfer_ix,
         &[
             pm_fee_vault.clone(),
             creator_token_account.clone(),
@@ -4030,6 +4005,11 @@ fn process_distribute_perp_fee(
     
     if config.discriminator != PERP_TRADING_FEE_CONFIG_DISCRIMINATOR {
         return Err(FundError::FundNotInitialized.into());
+    }
+    
+    // Verify authority
+    if config.authority != *authority.key {
+        return Err(FundError::AdminRequired.into());
     }
     
     // Calculate distribution
