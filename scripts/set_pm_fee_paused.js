@@ -25,7 +25,7 @@ const FUND_PROGRAM_ID = config.FUND_PROGRAM_ID;
 const PM_FEE_CONFIG_SEED = Buffer.from('prediction_market_fee_config');
 const FUND_IX_SET_PM_FEE_PAUSED = 47;
 
-const RPC_URL = process.env.RPC_URL || 'https://testnet-rpc.1024chain.com/rpc/';
+const RPC_URL = process.env.RPC_URL || 'https://rpc-testnet.1024chain.com/rpc/';
 
 // Look for key in multiple locations
 function findKeypairPath() {

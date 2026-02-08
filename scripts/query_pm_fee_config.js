@@ -18,7 +18,7 @@ const FUND_PROGRAM_ID = config.FUND_PROGRAM_ID;
 const PM_FEE_CONFIG_SEED = Buffer.from('prediction_market_fee_config');
 const PM_FEE_VAULT_SEED = Buffer.from('prediction_market_fee_vault');
 
-const RPC_URL = process.env.RPC_URL || 'https://testnet-rpc.1024chain.com/rpc/';
+const RPC_URL = process.env.RPC_URL || 'https://rpc-testnet.1024chain.com/rpc/';
 
 // Expected discriminator: "PM_FEE_C" = 0x504D5F4645455F43
 const EXPECTED_DISCRIMINATOR = Buffer.from([0x43, 0x5F, 0x45, 0x45, 0x46, 0x5F, 0x4D, 0x50]); // little-endian

@@ -386,6 +386,36 @@ pub enum FundInstruction {
     /// Relayer 版本的 BindReferral
     RelayerBindReferral(RelayerBindReferralArgs),
     
+    /// Relayer 版本的 CreateFund (Relayer 代付 gas, 无需用户签名)
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Relayer (Admin/Relayer)
+    /// 1. `[writable]` FundConfig PDA
+    /// 2. `[writable]` Fund PDA
+    /// 3. `[writable]` Fund Vault PDA (Token Account)
+    /// 4. `[writable]` Share Mint PDA
+    /// 5. `[]` Token Program
+    /// 6. `[]` System Program
+    RelayerCreateFund(RelayerCreateFundArgs),
+    
+    /// Relayer 版本的 CollectFees (Relayer 代付 gas, 后端验证 Manager 身份)
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Relayer (Admin/Relayer)
+    /// 1. `[]` FundConfig PDA
+    /// 2. `[writable]` Fund PDA
+    /// 3. `[writable]` Fund Vault PDA
+    /// 4. `[]` Token Program
+    RelayerCollectFees(RelayerCollectFeesArgs),
+    
+    /// Relayer 版本的 SetFundOpen (Relayer 代付 gas, 后端验证 Manager 身份)
+    /// 
+    /// Accounts:
+    /// 0. `[signer]` Relayer (Admin/Relayer)
+    /// 1. `[]` FundConfig PDA
+    /// 2. `[writable]` Fund PDA
+    RelayerSetFundOpen(RelayerSetFundOpenArgs),
+    
     // =========================================================================
     // Relayer Management Instructions (250-259)
     // =========================================================================
@@ -1016,6 +1046,41 @@ pub struct UpdateRelayerLimitsArgs {
     pub single_tx_limit_e6: Option<i64>,
     /// 每日限额 (e6), 0 = 无限制
     pub daily_limit_e6: Option<i64>,
+}
+
+/// Relayer 版本的 CreateFund (Relayer 代付 gas)
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct RelayerCreateFundArgs {
+    /// 基金经理钱包地址
+    pub manager_wallet: Pubkey,
+    /// 基金序号
+    pub fund_index: u8,
+    /// 基金名称 (max 32 bytes)
+    pub name: [u8; 32],
+    /// 管理费率 (bps)
+    pub management_fee_bps: u32,
+    /// 业绩费率 (bps)
+    pub performance_fee_bps: u32,
+    /// 是否使用高水位线
+    pub use_high_water_mark: bool,
+    /// 费用收取间隔 (秒)
+    pub fee_collection_interval: i64,
+}
+
+/// Relayer 版本的 CollectFees (Relayer 代付 gas)
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct RelayerCollectFeesArgs {
+    /// 基金经理钱包地址 (用于验证)
+    pub manager_wallet: Pubkey,
+}
+
+/// Relayer 版本的 SetFundOpen (Relayer 代付 gas)
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct RelayerSetFundOpenArgs {
+    /// 基金经理钱包地址 (用于验证)
+    pub manager_wallet: Pubkey,
+    /// 是否开放存款
+    pub is_open: bool,
 }
 
 // ============================================================================

@@ -185,6 +185,18 @@ pub fn process_instruction(
             msg!("Instruction: RelayerBindReferral");
             process_relayer_bind_referral(program_id, accounts, args)
         }
+        FundInstruction::RelayerCreateFund(args) => {
+            msg!("Instruction: RelayerCreateFund");
+            process_relayer_create_fund(program_id, accounts, args)
+        }
+        FundInstruction::RelayerCollectFees(args) => {
+            msg!("Instruction: RelayerCollectFees");
+            process_relayer_collect_fees(program_id, accounts, args)
+        }
+        FundInstruction::RelayerSetFundOpen(args) => {
+            msg!("Instruction: RelayerSetFundOpen");
+            process_relayer_set_fund_open(program_id, accounts, args)
+        }
         
         // Relayer Management
         FundInstruction::AddRelayer(args) => {
@@ -1056,6 +1068,8 @@ fn process_collect_fees(
     fund.collect_fees(mgmt_fee, perf_fee, current_ts)?;
     fund.serialize(&mut *fund_account.data.borrow_mut())?;
     
+    // 结构化事件日志 (供 fund_sync 解析)
+    msg!("Fund:FeesCollected:{}:{}:{}:{}", fund_account.key, manager.key, mgmt_fee, perf_fee);
     msg!("Fees collected:");
     msg!("  Management fee: {}", mgmt_fee);
     msg!("  Performance fee: {}", perf_fee);
@@ -1145,6 +1159,8 @@ fn process_update_nav(
     fund.last_update_ts = get_current_timestamp()?;
     fund.serialize(&mut *fund_account.data.borrow_mut())?;
     
+    // 结构化事件日志 (供 fund_sync 解析)
+    msg!("Fund:NAVUpdated:{}:{}", fund_account.key, fund.stats.current_nav_e6);
     msg!("NAV updated: {}", fund.stats.current_nav_e6);
     
     Ok(())
@@ -3268,6 +3284,26 @@ fn verify_and_check_relayer_limits(
 }
 
 /// Relayer 版本的 DepositToFund
+///
+/// 凭证模式 (Voucher Mode):
+/// 1. Relayer 签名 (代付 gas)
+/// 2. CPI 调用 Vault Program 的 RelayerWithdraw 减少用户 Vault 余额
+/// 3. Mint Share Token 给用户 (真实 SPL Token)
+/// 4. 创建/更新 LPPosition PDA
+/// 5. 更新 Fund 统计数据
+///
+/// Accounts:
+/// 0. `[signer]` Relayer (Admin/Relayer, 同时是 Vault Admin)
+/// 1. `[]` FundConfig PDA
+/// 2. `[writable]` Fund PDA
+/// 3. `[writable]` User's Vault UserAccount PDA (Vault Program owned)
+/// 4. `[writable]` LPPosition PDA
+/// 5. `[writable]` User's Share Token Account
+/// 6. `[writable]` Share Mint PDA
+/// 7. `[]` VaultConfig PDA
+/// 8. `[]` Vault Program
+/// 9. `[]` Token Program (spl_token for share minting)
+/// 10. `[]` System Program
 fn process_relayer_deposit_to_fund(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -3275,38 +3311,181 @@ fn process_relayer_deposit_to_fund(
 ) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
     
-    let relayer = next_account_info(account_info_iter)?;
+    let relayer = next_account_info(account_info_iter)?;          // 0
+    let fund_config_info = next_account_info(account_info_iter)?; // 1
+    let fund_account = next_account_info(account_info_iter)?;     // 2
+    let user_vault_account = next_account_info(account_info_iter)?; // 3
+    let lp_position = next_account_info(account_info_iter)?;      // 4
+    let user_shares = next_account_info(account_info_iter)?;      // 5
+    let share_mint = next_account_info(account_info_iter)?;       // 6
+    let vault_config = next_account_info(account_info_iter)?;     // 7
+    let vault_program = next_account_info(account_info_iter)?;    // 8
+    let token_program = next_account_info(account_info_iter)?;    // 9
+    let system_program = next_account_info(account_info_iter)?;   // 10
+    
+    // --- Step 1: Validate relayer authorization + limits ---
     assert_signer(relayer)?;
+    assert_owned_by(fund_config_info, program_id)?;
+    assert_owned_by(fund_account, program_id)?;
     
-    let fund_config = next_account_info(account_info_iter)?;
-    let fund = next_account_info(account_info_iter)?;
-    let _fund_vault = next_account_info(account_info_iter)?;
-    let _user_vault = next_account_info(account_info_iter)?;
-    let _lp_position = next_account_info(account_info_iter)?;
-    let _lp_share_account = next_account_info(account_info_iter)?;
-    let _share_mint = next_account_info(account_info_iter)?;
-    let _vault_config = next_account_info(account_info_iter)?;
-    let _vault_program = next_account_info(account_info_iter)?;
-    let _token_program = next_account_info(account_info_iter)?;
-    let _system_program = next_account_info(account_info_iter)?;
+    let mut config = FundConfig::try_from_slice(&fund_config_info.data.borrow())?;
     
-    // Load and validate FundConfig
-    let config = FundConfig::try_from_slice(&fund_config.data.borrow())?;
-    verify_fund_relayer(&config, relayer.key)?;
+    if config.discriminator != FUND_CONFIG_DISCRIMINATOR {
+        return Err(FundError::FundNotInitialized.into());
+    }
     
-    // Load Fund
-    let fund_data = Fund::try_from_slice(&fund.data.borrow())?;
+    if config.is_paused {
+        return Err(FundError::FundPaused.into());
+    }
     
-    // TODO: Implement actual deposit logic via Vault CPI
-    msg!("✅ RelayerDepositToFund");
-    msg!("  User: {}", args.user_wallet);
-    msg!("  Fund: {}", fund_data.name_str());
-    msg!("  Amount: {}", args.amount);
+    let amount_e6 = args.amount as i64;
+    if amount_e6 <= 0 {
+        return Err(FundError::InvalidAmount.into());
+    }
+    if amount_e6 < MIN_DEPOSIT_AMOUNT_E6 {
+        return Err(FundError::DepositTooSmall.into());
+    }
+    
+    let current_ts = get_current_timestamp()?;
+    verify_and_check_relayer_limits(&mut config, relayer.key, amount_e6, current_ts)?;
+    
+    // Save updated relayer limits
+    config.serialize(&mut *fund_config_info.data.borrow_mut())?;
+    
+    // --- Step 2: Load and validate Fund ---
+    let mut fund = Fund::try_from_slice(&fund_account.data.borrow())?;
+    
+    if fund.discriminator != FUND_DISCRIMINATOR {
+        return Err(FundError::InvalidFundAccount.into());
+    }
+    if !fund.can_deposit() {
+        return Err(FundError::FundClosed.into());
+    }
+    
+    // --- Step 3: CPI to Vault — reduce user's available_balance ---
+    crate::cpi::vault_relayer_withdraw(
+        vault_program.key,
+        relayer.clone(),
+        user_vault_account.clone(),
+        vault_config.clone(),
+        args.user_wallet,
+        args.amount,
+    )?;
+    
+    msg!("✅ Vault CPI: Withdrew {} e6 from user {}", args.amount, args.user_wallet);
+    
+    // --- Step 4: Calculate and mint shares ---
+    let shares = calculate_shares_to_mint(amount_e6, fund.stats.current_nav_e6)?;
+    
+    if shares == 0 {
+        return Err(FundError::ShareCalculationError.into());
+    }
+    
+    // Mint share tokens to user (Share Token uses Token-v1, Fund PDA is mint authority)
+    let fund_seeds = Fund::seeds(&fund.manager, fund.fund_index);
+    let fund_seeds_refs: Vec<&[u8]> = fund_seeds.iter().map(|s| s.as_slice()).collect();
+    let (_, fund_bump) = Pubkey::find_program_address(&fund_seeds_refs, program_id);
+    
+    invoke_signed(
+        &spl_token::instruction::mint_to(
+            &spl_token::id(),
+            share_mint.key,
+            user_shares.key,
+            fund_account.key,
+            &[],
+            shares,
+        )?,
+        &[share_mint.clone(), user_shares.clone(), fund_account.clone(), token_program.clone()],
+        &[&[FUND_SEED, fund.manager.as_ref(), &fund.fund_index.to_le_bytes(), &[fund_bump]]],
+    )?;
+    
+    msg!("✅ Minted {} shares to user", shares);
+    
+    // --- Step 5: Create or update LP position ---
+    let investor = args.user_wallet;
+    let lp_seeds = LPPosition::seeds(fund_account.key, &investor);
+    let lp_seeds_refs: Vec<&[u8]> = lp_seeds.iter().map(|s| s.as_slice()).collect();
+    let (lp_pda, lp_bump) = Pubkey::find_program_address(&lp_seeds_refs, program_id);
+    
+    if lp_position.key != &lp_pda {
+        return Err(FundError::InvalidPDA.into());
+    }
+    
+    if lp_position.data_is_empty() {
+        // Create new LP position — relayer pays for account creation
+        let rent = Rent::get()?;
+        let lp_space = LPPosition::SIZE;
+        let lp_lamports = rent.minimum_balance(lp_space);
+        
+        invoke_signed(
+            &system_instruction::create_account(
+                relayer.key,      // relayer pays rent
+                lp_position.key,
+                lp_lamports,
+                lp_space as u64,
+                program_id,
+            ),
+            &[relayer.clone(), lp_position.clone(), system_program.clone()],
+            &[&[LP_POSITION_SEED, fund_account.key.as_ref(), investor.as_ref(), &[lp_bump]]],
+        )?;
+        
+        let position = LPPosition::new(
+            *fund_account.key,
+            investor,
+            shares,
+            fund.stats.current_nav_e6,
+            amount_e6,
+            current_ts,
+            lp_bump,
+        );
+        position.serialize(&mut *lp_position.data.borrow_mut())?;
+        
+        fund.stats.lp_count = fund.stats.lp_count.saturating_add(1);
+    } else {
+        let mut position = LPPosition::try_from_slice(&lp_position.data.borrow())?;
+        position.add_shares(shares, amount_e6, fund.stats.current_nav_e6, current_ts)?;
+        position.serialize(&mut *lp_position.data.borrow_mut())?;
+    }
+    
+    // --- Step 6: Update Fund stats ---
+    fund.record_deposit(amount_e6, shares)?;
+    fund.last_update_ts = current_ts;
+    fund.serialize(&mut *fund_account.data.borrow_mut())?;
+    
+    // --- Step 7: Emit event log ---
+    msg!("Fund:Deposit:{}:{}:{}:{}", fund_account.key, investor, args.amount, shares);
+    msg!("✅ RelayerDepositToFund complete");
+    msg!("  User: {}", investor);
+    msg!("  Fund: {}", fund.name_str());
+    msg!("  Amount: {} e6", args.amount);
+    msg!("  Shares: {}", shares);
+    msg!("  NAV: {}", fund.stats.current_nav_e6);
     
     Ok(())
 }
 
 /// Relayer 版本的 RedeemFromFund
+///
+/// 凭证模式 (Voucher Mode):
+/// 1. Relayer 签名 (代付 gas)
+/// 2. 验证 LP 持仓和份额
+/// 3. Burn Share Token (使用 Relayer 代理 burn — Fund PDA 作为 mint authority)
+/// 4. CPI 调用 Vault Program 的 RelayerDeposit 增加用户 Vault 余额
+/// 5. 更新 LPPosition PDA
+/// 6. 更新 Fund 统计数据
+///
+/// Accounts:
+/// 0. `[signer]` Relayer (Admin/Relayer, 同时是 Vault Admin)
+/// 1. `[]` FundConfig PDA
+/// 2. `[writable]` Fund PDA
+/// 3. `[writable]` User's Vault UserAccount PDA (Vault Program owned)
+/// 4. `[writable]` LPPosition PDA
+/// 5. `[writable]` User's Share Token Account
+/// 6. `[writable]` Share Mint PDA
+/// 7. `[writable]` VaultConfig PDA
+/// 8. `[]` Vault Program
+/// 9. `[]` Token Program (spl_token for share burning)
+/// 10. `[]` System Program
 fn process_relayer_redeem_from_fund(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -3314,18 +3493,133 @@ fn process_relayer_redeem_from_fund(
 ) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
     
-    let relayer = next_account_info(account_info_iter)?;
+    let relayer = next_account_info(account_info_iter)?;          // 0
+    let fund_config_info = next_account_info(account_info_iter)?; // 1
+    let fund_account = next_account_info(account_info_iter)?;     // 2
+    let user_vault_account = next_account_info(account_info_iter)?; // 3
+    let lp_position = next_account_info(account_info_iter)?;      // 4
+    let user_shares = next_account_info(account_info_iter)?;      // 5
+    let share_mint = next_account_info(account_info_iter)?;       // 6
+    let vault_config = next_account_info(account_info_iter)?;     // 7
+    let vault_program = next_account_info(account_info_iter)?;    // 8
+    let token_program = next_account_info(account_info_iter)?;    // 9
+    let system_program = next_account_info(account_info_iter)?;   // 10
+    
+    // --- Step 1: Validate relayer authorization ---
     assert_signer(relayer)?;
+    assert_owned_by(fund_config_info, program_id)?;
+    assert_owned_by(fund_account, program_id)?;
     
-    let fund_config = next_account_info(account_info_iter)?;
+    let mut config = FundConfig::try_from_slice(&fund_config_info.data.borrow())?;
     
-    let config = FundConfig::try_from_slice(&fund_config.data.borrow())?;
+    if config.discriminator != FUND_CONFIG_DISCRIMINATOR {
+        return Err(FundError::FundNotInitialized.into());
+    }
+    
+    if config.is_paused {
+        return Err(FundError::FundPaused.into());
+    }
+    
+    if args.shares == 0 {
+        return Err(FundError::InvalidAmount.into());
+    }
+    
+    let current_ts = get_current_timestamp()?;
     verify_fund_relayer(&config, relayer.key)?;
     
-    // TODO: Implement actual redemption logic
-    msg!("✅ RelayerRedeemFromFund");
-    msg!("  User: {}", args.user_wallet);
-    msg!("  Shares: {}", args.shares);
+    // --- Step 2: Load and validate Fund ---
+    let mut fund = Fund::try_from_slice(&fund_account.data.borrow())?;
+    
+    if !fund.can_withdraw() {
+        return Err(FundError::FundPaused.into());
+    }
+    
+    // --- Step 3: Validate LP position ---
+    let investor = args.user_wallet;
+    let mut position = LPPosition::try_from_slice(&lp_position.data.borrow())?;
+    
+    if position.fund != *fund_account.key {
+        return Err(FundError::LPPositionNotFound.into());
+    }
+    // Verify investor matches — in relayer mode we check against args.user_wallet
+    if position.investor != investor {
+        return Err(FundError::NotLPInvestor.into());
+    }
+    if position.shares < args.shares {
+        return Err(FundError::InsufficientShares.into());
+    }
+    
+    // --- Step 4: Calculate redemption value ---
+    let redemption_value = calculate_redemption_value(args.shares, fund.stats.current_nav_e6)?;
+    
+    // Check relayer limits for the redemption amount
+    verify_and_check_relayer_limits(&mut config, relayer.key, redemption_value, current_ts)?;
+    config.serialize(&mut *fund_config_info.data.borrow_mut())?;
+    
+    // --- Step 5: Burn share tokens ---
+    // In relayer/voucher mode, share token accounts are owned by the Fund PDA
+    // (created during RelayerDepositToFund with Fund PDA as owner).
+    // This allows the Fund PDA to burn tokens via invoke_signed without
+    // requiring the investor's signature.
+    //
+    // The LPPosition PDA is the authoritative record of each LP's ownership.
+    // The SPL share tokens serve as an on-chain proof of the fund's total
+    // share supply (share_mint.supply == fund.stats.total_shares).
+    let fund_seeds = Fund::seeds(&fund.manager, fund.fund_index);
+    let fund_seeds_refs: Vec<&[u8]> = fund_seeds.iter().map(|s| s.as_slice()).collect();
+    let (_, fund_bump) = Pubkey::find_program_address(&fund_seeds_refs, program_id);
+    let fund_signer_seeds: &[&[u8]] = &[FUND_SEED, fund.manager.as_ref(), &fund.fund_index.to_le_bytes(), &[fund_bump]];
+    
+    invoke_signed(
+        &spl_token::instruction::burn(
+            &spl_token::id(),
+            user_shares.key,
+            share_mint.key,
+            fund_account.key,  // Fund PDA is owner of the share token account
+            &[],
+            args.shares,
+        )?,
+        &[user_shares.clone(), share_mint.clone(), fund_account.clone(), token_program.clone()],
+        &[fund_signer_seeds],
+    )?;
+    
+    msg!("✅ Burned {} shares", args.shares);
+    
+    // --- Step 6: CPI to Vault — increase user's available_balance ---
+    crate::cpi::vault_relayer_deposit(
+        vault_program.key,
+        relayer.clone(),
+        user_vault_account.clone(),
+        vault_config.clone(),
+        system_program.clone(),
+        investor,
+        redemption_value as u64,
+    )?;
+    
+    msg!("✅ Vault CPI: Deposited {} e6 to user {}", redemption_value, investor);
+    
+    // --- Step 7: Update LP position ---
+    position.remove_shares(args.shares, redemption_value, current_ts)?;
+    
+    if position.is_empty() {
+        fund.stats.lp_count = fund.stats.lp_count.saturating_sub(1);
+    }
+    
+    position.serialize(&mut *lp_position.data.borrow_mut())?;
+    
+    // --- Step 8: Update Fund stats ---
+    fund.record_withdrawal(redemption_value, args.shares)?;
+    fund.last_update_ts = current_ts;
+    fund.serialize(&mut *fund_account.data.borrow_mut())?;
+    
+    // --- Step 9: Emit event log ---
+    msg!("Fund:Redeem:{}:{}:{}:{}", fund_account.key, investor, args.shares, redemption_value);
+    msg!("✅ RelayerRedeemFromFund complete");
+    msg!("  User: {}", investor);
+    msg!("  Fund: {}", fund.name_str());
+    msg!("  Shares burned: {}", args.shares);
+    msg!("  USDC returned: {} e6", redemption_value);
+    msg!("  NAV: {}", fund.stats.current_nav_e6);
     
     Ok(())
 }
@@ -4098,6 +4392,250 @@ fn process_update_perp_fee_config(
     msg!("✅ PerpTradingFeeConfig updated");
     msg!("  Taker fee: {} bps", config.taker_fee_bps);
     msg!("  Maker fee: {} bps", config.maker_fee_bps);
+    
+    Ok(())
+}
+
+// =============================================================================
+// Relayer 版本: CreateFund / CollectFees / SetFundOpen
+// 全部由 Relayer 代签代付 gas, 用户零签名
+// =============================================================================
+
+/// Relayer 版本的 CreateFund
+/// 
+/// 复用 process_create_fund 的核心逻辑，但签名者是 Relayer 而非 Manager。
+/// manager_wallet 通过参数传入，后端在调用前已通过 JWT 验证 Manager 身份。
+fn process_relayer_create_fund(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: RelayerCreateFundArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let relayer = next_account_info(account_info_iter)?;
+    let fund_config_info = next_account_info(account_info_iter)?;
+    let fund_account = next_account_info(account_info_iter)?;
+    let fund_vault = next_account_info(account_info_iter)?;
+    let share_mint = next_account_info(account_info_iter)?;
+    let token_program = next_account_info(account_info_iter)?;
+    let system_program = next_account_info(account_info_iter)?;
+    
+    assert_signer(relayer)?;
+    assert_owned_by(fund_config_info, program_id)?;
+    
+    let mut config = FundConfig::try_from_slice(&fund_config_info.data.borrow())?;
+    if config.discriminator != FUND_CONFIG_DISCRIMINATOR {
+        return Err(FundError::FundNotInitialized.into());
+    }
+    if config.is_paused {
+        return Err(FundError::FundPaused.into());
+    }
+    
+    verify_fund_relayer(&config, relayer.key)?;
+    
+    let manager = args.manager_wallet;
+    let fund_index = config.total_funds;
+    
+    // 验证费率
+    if args.management_fee_bps > MAX_MANAGEMENT_FEE_BPS {
+        return Err(FundError::ManagementFeeTooHigh.into());
+    }
+    if args.performance_fee_bps > MAX_PERFORMANCE_FEE_BPS {
+        return Err(FundError::PerformanceFeeTooHigh.into());
+    }
+    
+    let fee_config = FeeConfig {
+        management_fee_bps: args.management_fee_bps,
+        performance_fee_bps: args.performance_fee_bps,
+        use_high_water_mark: args.use_high_water_mark,
+        fee_collection_interval: args.fee_collection_interval,
+    };
+    
+    // 推导 PDA
+    let fund_seeds = Fund::seeds(&manager, fund_index);
+    let fund_seeds_refs: Vec<&[u8]> = fund_seeds.iter().map(|s| s.as_slice()).collect();
+    let (fund_pda, fund_bump) = Pubkey::find_program_address(&fund_seeds_refs, program_id);
+    
+    if fund_account.key != &fund_pda {
+        return Err(FundError::InvalidPDA.into());
+    }
+    
+    let current_ts = get_current_timestamp()?;
+    
+    // 创建 Fund PDA (Relayer 代付 rent)
+    let rent = Rent::get()?;
+    let fund_space = Fund::SIZE;
+    let fund_lamports = rent.minimum_balance(fund_space);
+    
+    invoke_signed(
+        &system_instruction::create_account(
+            relayer.key,
+            fund_account.key,
+            fund_lamports,
+            fund_space as u64,
+            program_id,
+        ),
+        &[relayer.clone(), fund_account.clone(), system_program.clone()],
+        &[&[FUND_SEED, manager.as_ref(), &fund_index.to_le_bytes(), &[fund_bump]]],
+    )?;
+    
+    // 初始化 Fund Vault (SPL Token Account)
+    let vault_seeds = Fund::vault_seeds(fund_account.key);
+    let vault_seeds_refs: Vec<&[u8]> = vault_seeds.iter().map(|s| s.as_slice()).collect();
+    let (vault_pda, _vault_bump) = Pubkey::find_program_address(&vault_seeds_refs, program_id);
+    
+    if fund_vault.key != &vault_pda {
+        return Err(FundError::InvalidPDA.into());
+    }
+    
+    // 初始化 Share Mint
+    let mint_seeds = Fund::share_mint_seeds(fund_account.key);
+    let mint_seeds_refs: Vec<&[u8]> = mint_seeds.iter().map(|s| s.as_slice()).collect();
+    let (mint_pda, _mint_bump) = Pubkey::find_program_address(&mint_seeds_refs, program_id);
+    
+    if share_mint.key != &mint_pda {
+        return Err(FundError::InvalidPDA.into());
+    }
+    
+    // 初始化 Fund 数据
+    let fund = Fund::new(
+        manager,
+        &String::from_utf8_lossy(&args.name),
+        fund_bump,
+        *fund_vault.key,
+        *share_mint.key,
+        fee_config,
+        fund_index,
+        current_ts,
+    );
+    fund.serialize(&mut *fund_account.data.borrow_mut())?;
+    
+    // 更新 FundConfig
+    config.total_funds = config.total_funds.saturating_add(1);
+    config.serialize(&mut *fund_config_info.data.borrow_mut())?;
+    
+    msg!("Fund:Created:{}:{}:{}", fund_account.key, manager, fund_index);
+    msg!("✅ RelayerCreateFund complete");
+    msg!("  Manager: {}", manager);
+    msg!("  Fund PDA: {}", fund_account.key);
+    msg!("  Fund Index: {}", fund_index);
+    
+    Ok(())
+}
+
+/// Relayer 版本的 CollectFees
+/// 
+/// Relayer 代签，后端通过 JWT 验证调用者是 Manager。
+/// 链上通过 args.manager_wallet 验证与 Fund.manager 一致。
+fn process_relayer_collect_fees(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: RelayerCollectFeesArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let relayer = next_account_info(account_info_iter)?;
+    let fund_config_info = next_account_info(account_info_iter)?;
+    let fund_account = next_account_info(account_info_iter)?;
+    let fund_vault = next_account_info(account_info_iter)?;
+    let _token_program = next_account_info(account_info_iter)?;
+    
+    assert_signer(relayer)?;
+    assert_owned_by(fund_config_info, program_id)?;
+    assert_owned_by(fund_account, program_id)?;
+    
+    let config = FundConfig::try_from_slice(&fund_config_info.data.borrow())?;
+    if config.discriminator != FUND_CONFIG_DISCRIMINATOR {
+        return Err(FundError::FundNotInitialized.into());
+    }
+    verify_fund_relayer(&config, relayer.key)?;
+    
+    let mut fund = Fund::try_from_slice(&fund_account.data.borrow())?;
+    
+    // 验证 manager_wallet 与链上 Fund.manager 一致
+    if fund.manager != args.manager_wallet {
+        return Err(FundError::NotFundManager.into());
+    }
+    
+    let current_ts = get_current_timestamp()?;
+    
+    // 检查收费间隔
+    if !can_collect_fees(fund.stats.last_fee_collection_ts, fund.fee_config.fee_collection_interval)? {
+        return Err(FundError::FeeCollectionTooEarly.into());
+    }
+    
+    // 计算费用 (复用链上逻辑)
+    let total_value = fund.stats.total_value_e6();
+    let time_elapsed = current_ts - fund.stats.last_fee_collection_ts;
+    
+    let mgmt_fee = calculate_management_fee(
+        total_value, fund.fee_config.management_fee_bps, time_elapsed,
+    )?;
+    
+    let perf_fee = if fund.fee_config.use_high_water_mark {
+        calculate_performance_fee(
+            fund.stats.current_nav_e6, fund.stats.high_water_mark_e6,
+            total_value, fund.fee_config.performance_fee_bps,
+        )?
+    } else {
+        0
+    };
+    
+    let total_fee = safe_add_i64(mgmt_fee, perf_fee)?;
+    if total_fee <= 0 {
+        return Err(FundError::NoFeesToCollect.into());
+    }
+    
+    // 记录费用 (更新 Fund 状态)
+    fund.stats.total_management_fee_e6 = safe_add_i64(fund.stats.total_management_fee_e6, mgmt_fee)?;
+    fund.stats.total_performance_fee_e6 = safe_add_i64(fund.stats.total_performance_fee_e6, perf_fee)?;
+    fund.stats.last_fee_collection_ts = current_ts;
+    fund.stats.update_hwm();
+    fund.last_update_ts = current_ts;
+    fund.serialize(&mut *fund_account.data.borrow_mut())?;
+    
+    msg!("Fund:FeesCollected:{}:{}:{}:{}", fund_account.key, args.manager_wallet, mgmt_fee, perf_fee);
+    msg!("✅ RelayerCollectFees complete");
+    msg!("  Management fee: {}", mgmt_fee);
+    msg!("  Performance fee: {}", perf_fee);
+    
+    Ok(())
+}
+
+/// Relayer 版本的 SetFundOpen
+fn process_relayer_set_fund_open(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    args: RelayerSetFundOpenArgs,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    
+    let relayer = next_account_info(account_info_iter)?;
+    let fund_config_info = next_account_info(account_info_iter)?;
+    let fund_account = next_account_info(account_info_iter)?;
+    
+    assert_signer(relayer)?;
+    assert_owned_by(fund_config_info, program_id)?;
+    assert_owned_by(fund_account, program_id)?;
+    
+    let config = FundConfig::try_from_slice(&fund_config_info.data.borrow())?;
+    if config.discriminator != FUND_CONFIG_DISCRIMINATOR {
+        return Err(FundError::FundNotInitialized.into());
+    }
+    verify_fund_relayer(&config, relayer.key)?;
+    
+    let mut fund = Fund::try_from_slice(&fund_account.data.borrow())?;
+    
+    // 验证 manager_wallet 与链上 Fund.manager 一致
+    if fund.manager != args.manager_wallet {
+        return Err(FundError::NotFundManager.into());
+    }
+    
+    fund.is_open = args.is_open;
+    fund.last_update_ts = get_current_timestamp()?;
+    fund.serialize(&mut *fund_account.data.borrow_mut())?;
+    
+    msg!("✅ RelayerSetFundOpen: {} is now {}", fund_account.key, if args.is_open { "OPEN" } else { "CLOSED" });
     
     Ok(())
 }

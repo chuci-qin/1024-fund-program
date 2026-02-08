@@ -52,7 +52,7 @@ const DEFAULT_CONFIG = {
 };
 
 // RPC Configuration
-const RPC_URL = process.env.RPC_URL || 'https://testnet-rpc.1024chain.com/rpc/';
+const RPC_URL = process.env.RPC_URL || 'https://rpc-testnet.1024chain.com/rpc/';
 // Look for key in multiple locations
 const KEYPAIR_PATHS = [
   process.env.KEYPAIR_PATH,

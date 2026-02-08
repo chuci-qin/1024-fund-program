@@ -66,8 +66,8 @@ pub use error::FundError;
 pub use instruction::FundInstruction;
 pub use state::{Fund, FundConfig, FundStats, FeeConfig, LPPosition};
 
-// Program ID placeholder - will be replaced after deployment
-solana_program::declare_id!("FundProg11111111111111111111111111111111111");
+// Program ID (1024Chain Testnet - deployed 2026-02-02)
+solana_program::declare_id!("HiWychKmtZaDdsbpAe7sB422sYfhPATiFgUfm6yyCLVe");
 
 #[cfg(test)]
 mod tests {
