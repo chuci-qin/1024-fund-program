@@ -244,6 +244,39 @@ enum VaultInstruction {
     _ExecuteRecurringPayment { _payer: Pubkey, _payee: Pubkey, _amount: u64, _fee: u64, _cycle_count: u32 },
     // 41: CancelRecurringAuth
     _CancelRecurringAuth { _payer: Pubkey, _payee: Pubkey },
+    // 42: CreditUserBalance (G5 A3)
+    CreditUserBalance { user_wallet: Pubkey, amount: u64 },
+}
+
+/// CPI: Vault CreditUserBalance (纯记账余额变动 — 仅限 Fund Program 调用)
+///
+/// 用于手续费分配、管理费收取等场景。替代真实 SPL Token Transfer。
+pub fn vault_credit_user_balance<'a>(
+    vault_program_id: &Pubkey,
+    fund_pda: AccountInfo<'a>,         // [signer] Fund PDA (caller, verified by Vault)
+    vault_config: AccountInfo<'a>,     // [] VaultConfig
+    user_account: AccountInfo<'a>,     // [writable] Target UserAccount PDA
+    user_wallet: Pubkey,
+    amount: u64,
+    signer_seeds: &[&[u8]],
+) -> ProgramResult {
+    let instruction = Instruction {
+        program_id: *vault_program_id,
+        accounts: vec![
+            AccountMeta::new(*fund_pda.key, true),          // caller (signer)
+            AccountMeta::new_readonly(*vault_config.key, false),
+            AccountMeta::new(*user_account.key, false),     // target user account
+        ],
+        data: VaultInstruction::CreditUserBalance { user_wallet, amount }
+            .try_to_vec()
+            .map_err(|_| ProgramError::InvalidInstructionData)?,
+    };
+
+    invoke_signed(
+        &instruction,
+        &[fund_pda, vault_config, user_account],
+        &[signer_seeds],
+    )
 }
 
 /// CPI: Vault RelayerWithdraw (Fund deposit → reduce user's Vault balance)
