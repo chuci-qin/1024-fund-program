@@ -44,7 +44,7 @@ const FUND_IX_INIT_PM_FEE_CONFIG = 40;
 const DEFAULT_CONFIG = {
   mintingFeeBps: 10,           // 0.1%
   redemptionFeeBps: 10,        // 0.1%
-  tradingFeeTakerBps: 10,      // 0.1%
+  tradingFeeTakerBps: 150,     // 1.5%
   tradingFeeMakerBps: 0,       // 0% (maker gets rebate, not charged)
   protocolShareBps: 7000,      // 70%
   makerRewardShareBps: 2000,   // 20%

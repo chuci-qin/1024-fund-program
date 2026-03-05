@@ -1780,12 +1780,12 @@ impl PredictionMarketFeeConfig {
             discriminator: PREDICTION_MARKET_FEE_CONFIG_DISCRIMINATOR,
             prediction_market_fee_vault,
             bump,
-            // 默认费率
-            prediction_market_minting_fee_bps: 10,      // 0.1%
-            prediction_market_redemption_fee_bps: 10,   // 0.1%
-            prediction_market_trading_fee_taker_bps: 10, // 0.1%
-            prediction_market_trading_fee_maker_bps: 0,  // 0%
-            prediction_market_settlement_fee_bps: 0,     // 0%
+            // 默认费率（必须与 .cursorrules 规范一致）
+            prediction_market_minting_fee_bps: 10,       // 0.1% mint fee
+            prediction_market_redemption_fee_bps: 10,    // 0.1% redeem fee
+            prediction_market_trading_fee_taker_bps: 150, // 1.5% taker fee (per .cursorrules PM Taker = 150 bps)
+            prediction_market_trading_fee_maker_bps: 10,  // 0.1% maker fee (per .cursorrules PM Maker = 10 bps)
+            prediction_market_settlement_fee_bps: 0,      // 0% settlement fee
             // 默认分配比例
             prediction_market_protocol_share_bps: 7000,      // 70%
             prediction_market_maker_reward_share_bps: 2000,  // 20%
@@ -1835,12 +1835,12 @@ impl PredictionMarketFeeConfig {
         (volume_e6 as i128 * self.prediction_market_trading_fee_maker_bps as i128 / 10000) as i64
     }
     
-    /// 分配预测市场手续费
+    /// 分配预测市场手续费（使用余数归末项确保 sum == fee_e6）
     /// 返回 (protocol_amount, maker_reward, creator_reward)
     pub fn distribute_prediction_market_fee(&self, fee_e6: i64) -> (i64, i64, i64) {
         let protocol = (fee_e6 as i128 * self.prediction_market_protocol_share_bps as i128 / 10000) as i64;
         let maker = (fee_e6 as i128 * self.prediction_market_maker_reward_share_bps as i128 / 10000) as i64;
-        let creator = (fee_e6 as i128 * self.prediction_market_creator_share_bps as i128 / 10000) as i64;
+        let creator = fee_e6 - protocol - maker;
         (protocol, maker, creator)
     }
     
@@ -1924,10 +1924,10 @@ pub struct SpotTradingFeeConfig {
     
     // === Spot 费率配置 (basis points, 10000 = 100%) ===
     
-    /// Taker 交易费率 (默认 20 = 0.2%)
+    /// Taker 交易费率 (默认 5 bps = 0.05%)
     pub taker_fee_bps: u16,
     
-    /// Maker 交易费率 (默认 5 = 0.05%)
+    /// Maker 交易费率 (默认 2 bps = 0.02%)
     pub maker_fee_bps: u16,
     
     // === 费用分配比例 (basis points, 总计 10000) ===
@@ -2017,9 +2017,8 @@ impl SpotTradingFeeConfig {
             discriminator: SPOT_TRADING_FEE_CONFIG_DISCRIMINATOR,
             spot_fee_vault,
             bump,
-            // 默认费率
-            taker_fee_bps: 20,      // 0.2%
-            maker_fee_bps: 5,       // 0.05%
+            taker_fee_bps: 5,       // 5 bps = 0.05%
+            maker_fee_bps: 2,       // 2 bps = 0.02%
             // 默认分配比例
             protocol_share_bps: 6000,     // 60%
             insurance_share_bps: 2000,    // 20%
@@ -2060,13 +2059,13 @@ impl SpotTradingFeeConfig {
         (volume_e6 as i128 * self.maker_fee_bps as i128 / 10000) as i64
     }
 
-    /// 分配手续费
+    /// 分配手续费（NEW-005-FIX: 使用余数归末项确保 sum == fee_e6）
     /// 返回 (protocol, insurance, referral, maker_reward)
     pub fn distribute_fee(&self, fee_e6: i64) -> (i64, i64, i64, i64) {
         let protocol = (fee_e6 as i128 * self.protocol_share_bps as i128 / 10000) as i64;
         let insurance = (fee_e6 as i128 * self.insurance_share_bps as i128 / 10000) as i64;
         let referral = (fee_e6 as i128 * self.referral_share_bps as i128 / 10000) as i64;
-        let maker = (fee_e6 as i128 * self.maker_reward_share_bps as i128 / 10000) as i64;
+        let maker = fee_e6 - protocol - insurance - referral;
         (protocol, insurance, referral, maker)
     }
 
@@ -2137,12 +2136,12 @@ pub struct PerpTradingFeeConfig {
     
     // === Perp 费率配置 (basis points, 10000 = 100%) ===
     
-    /// Taker 交易费率 (默认 50 = 0.05%)
+    /// Taker 交易费率 (默认 5 bps = 0.05%)
     pub taker_fee_bps: u16,
     
-    /// Maker 交易费率 (默认 20 = 0.02%)
+    /// Maker 交易费率 (默认 2 bps = 0.02%)
     pub maker_fee_bps: u16,
-    
+
     // === 费用分配比例 (basis points, 总计 10000) ===
     
     /// 协议收入占比 (默认 6000 = 60%)
@@ -2230,9 +2229,8 @@ impl PerpTradingFeeConfig {
             discriminator: PERP_TRADING_FEE_CONFIG_DISCRIMINATOR,
             perp_fee_vault,
             bump,
-            // 默认费率 (Perp 使用较低费率)
-            taker_fee_bps: 50,      // 0.05%
-            maker_fee_bps: 20,      // 0.02%
+            taker_fee_bps: 5,       // 5 bps = 0.05%
+            maker_fee_bps: 2,       // 2 bps = 0.02%
             // 默认分配比例
             protocol_share_bps: 6000,     // 60%
             insurance_share_bps: 2000,    // 20%
@@ -2273,13 +2271,13 @@ impl PerpTradingFeeConfig {
         (volume_e6 as i128 * self.maker_fee_bps as i128 / 10000) as i64
     }
 
-    /// 分配手续费
+    /// 分配手续费（NEW-005-FIX: 使用余数归末项确保 sum == fee_e6）
     /// 返回 (protocol, insurance, referral, maker_reward)
     pub fn distribute_fee(&self, fee_e6: i64) -> (i64, i64, i64, i64) {
         let protocol = (fee_e6 as i128 * self.protocol_share_bps as i128 / 10000) as i64;
         let insurance = (fee_e6 as i128 * self.insurance_share_bps as i128 / 10000) as i64;
         let referral = (fee_e6 as i128 * self.referral_share_bps as i128 / 10000) as i64;
-        let maker = (fee_e6 as i128 * self.maker_reward_share_bps as i128 / 10000) as i64;
+        let maker = fee_e6 - protocol - insurance - referral;
         (protocol, insurance, referral, maker)
     }
 
