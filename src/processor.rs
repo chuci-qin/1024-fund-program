@@ -125,9 +125,9 @@ pub fn process_instruction(
             msg!("Instruction: InitializeSpotTradingFeeConfig");
             process_initialize_spot_fee_config(program_id, accounts, args)
         }
-        FundInstruction::CollectSpotTradingFee(args) => {
-            msg!("Instruction: CollectSpotTradingFee");
-            process_collect_spot_trading_fee(program_id, accounts, args)
+        FundInstruction::CollectSpotTradingFee(_) => {
+            msg!("Instruction: CollectSpotTradingFee (deprecated — fee collection via pure accounting)");
+            Err(solana_program::program_error::ProgramError::InvalidInstructionData)
         }
         FundInstruction::DistributeSpotFee(args) => {
             msg!("Instruction: DistributeSpotFee");
@@ -147,9 +147,9 @@ pub fn process_instruction(
             msg!("Instruction: InitializePerpTradingFeeConfig");
             process_initialize_perp_fee_config(program_id, accounts, args)
         }
-        FundInstruction::CollectPerpTradingFee(args) => {
-            msg!("Instruction: CollectPerpTradingFee");
-            process_collect_perp_trading_fee(program_id, accounts, args)
+        FundInstruction::CollectPerpTradingFee(_) => {
+            msg!("Instruction: CollectPerpTradingFee (deprecated — fee collection via pure accounting)");
+            Err(solana_program::program_error::ProgramError::InvalidInstructionData)
         }
         FundInstruction::DistributePerpFee(args) => {
             msg!("Instruction: DistributePerpFee");
@@ -627,139 +627,6 @@ fn process_deposit_to_fund(
     Err(solana_program::program_error::ProgramError::InvalidInstructionData)
 }
 
-// G4 F1.1: 以下为废弃的 DepositToFund 旧实现（已用 deprecated 替代）
-#[allow(dead_code)]
-fn _deprecated_process_deposit_to_fund(
-    program_id: &Pubkey,
-    accounts: &[AccountInfo],
-    args: DepositToFundArgs,
-) -> ProgramResult {
-    let account_info_iter = &mut accounts.iter();
-    
-    let investor = next_account_info(account_info_iter)?;
-    let fund_account = next_account_info(account_info_iter)?;
-    let fund_vault = next_account_info(account_info_iter)?;
-    let investor_usdc = next_account_info(account_info_iter)?;
-    let lp_position = next_account_info(account_info_iter)?;
-    let investor_shares = next_account_info(account_info_iter)?;
-    let share_mint = next_account_info(account_info_iter)?;
-    let token_program = next_account_info(account_info_iter)?;
-    let system_program = next_account_info(account_info_iter)?;
-    
-    assert_signer(investor)?;
-    assert_owned_by(fund_account, program_id)?;
-    
-    if args.amount == 0 {
-        return Err(FundError::InvalidAmount.into());
-    }
-    
-    let amount_e6 = args.amount as i64;
-    if amount_e6 < MIN_DEPOSIT_AMOUNT_E6 {
-        return Err(FundError::DepositTooSmall.into());
-    }
-    
-    let mut fund = Fund::try_from_slice(&fund_account.data.borrow())?;
-    
-    if fund.discriminator != FUND_DISCRIMINATOR {
-        return Err(FundError::InvalidFundAccount.into());
-    }
-    
-    if !fund.can_deposit() {
-        return Err(FundError::FundClosed.into());
-    }
-    
-    let current_ts = get_current_timestamp()?;
-    
-    // Calculate shares to mint
-    let shares = calculate_shares_to_mint(amount_e6, fund.stats.current_nav_e6)?;
-    
-    // Transfer USDC to fund vault - 使用 token_compat 支持 Token-2022
-    token_compat::transfer(
-        token_program,
-        investor_usdc,
-        fund_vault,
-        investor,
-        args.amount,
-        None, // 投资者签名，不需要 PDA seeds
-    )?;
-    
-    // Mint share tokens to investor (Share Token 使用 Token-v1)
-    let fund_seeds = Fund::seeds(&fund.manager, fund.fund_index);
-    let fund_seeds_refs: Vec<&[u8]> = fund_seeds.iter().map(|s| s.as_slice()).collect();
-    let (_, fund_bump) = Pubkey::find_program_address(&fund_seeds_refs, program_id);
-    
-    invoke_signed(
-        &spl_token::instruction::mint_to(
-            &spl_token::id(),
-            share_mint.key,
-            investor_shares.key,
-            fund_account.key,
-            &[],
-            shares,
-        )?,
-        &[share_mint.clone(), investor_shares.clone(), fund_account.clone(), token_program.clone()],
-        &[&[FUND_SEED, fund.manager.as_ref(), &fund.fund_index.to_le_bytes(), &[fund_bump]]],
-    )?;
-    
-    // Update or create LP position
-    let lp_seeds = LPPosition::seeds(fund_account.key, investor.key);
-    let lp_seeds_refs: Vec<&[u8]> = lp_seeds.iter().map(|s| s.as_slice()).collect();
-    let (lp_pda, lp_bump) = Pubkey::find_program_address(&lp_seeds_refs, program_id);
-    
-    if lp_position.key != &lp_pda {
-        return Err(FundError::InvalidPDA.into());
-    }
-    
-    if lp_position.data_is_empty() {
-        // Create new LP position
-        let rent = Rent::get()?;
-        let lp_space = LPPosition::SIZE;
-        let lp_lamports = rent.minimum_balance(lp_space);
-        
-        invoke_signed(
-            &system_instruction::create_account(
-                investor.key,
-                lp_position.key,
-                lp_lamports,
-                lp_space as u64,
-                program_id,
-            ),
-            &[investor.clone(), lp_position.clone(), system_program.clone()],
-            &[&[LP_POSITION_SEED, fund_account.key.as_ref(), investor.key.as_ref(), &[lp_bump]]],
-        )?;
-        
-        let position = LPPosition::new(
-            *fund_account.key,
-            *investor.key,
-            shares,
-            fund.stats.current_nav_e6,
-            amount_e6,
-            current_ts,
-            lp_bump,
-        );
-        position.serialize(&mut *lp_position.data.borrow_mut())?;
-        
-        // Increment LP count
-        fund.stats.lp_count = fund.stats.lp_count.saturating_add(1);
-    } else {
-        // Update existing LP position
-        let mut position = LPPosition::try_from_slice(&lp_position.data.borrow())?;
-        position.add_shares(shares, amount_e6, fund.stats.current_nav_e6, current_ts)?;
-        position.serialize(&mut *lp_position.data.borrow_mut())?;
-    }
-    
-    // Update fund stats
-    fund.record_deposit(amount_e6, shares)?;
-    fund.last_update_ts = current_ts;
-    fund.serialize(&mut *fund_account.data.borrow_mut())?;
-    
-    msg!("Deposit to fund: {} USDC", args.amount);
-    msg!("Shares minted: {}", shares);
-    msg!("Current NAV: {}", fund.stats.current_nav_e6);
-    
-    Ok(())
-}
-
 /// Redeem shares from a fund (G4 F1.2: DEPRECATED)
 fn process_redeem_from_fund(
     _program_id: &Pubkey,
@@ -768,107 +635,6 @@ fn process_redeem_from_fund(
 ) -> ProgramResult {
     msg!("❌ Direct RedeemFromFund DEPRECATED — use RelayerRedeemFromFund instead");
     Err(solana_program::program_error::ProgramError::InvalidInstructionData)
-}
-
-#[allow(dead_code)]
-fn _deprecated_process_redeem_from_fund(
-    program_id: &Pubkey,
-    accounts: &[AccountInfo],
-    args: RedeemFromFundArgs,
-) -> ProgramResult {
-    let account_info_iter = &mut accounts.iter();
-    
-    let investor = next_account_info(account_info_iter)?;
-    let fund_account = next_account_info(account_info_iter)?;
-    let fund_vault = next_account_info(account_info_iter)?;
-    let investor_usdc = next_account_info(account_info_iter)?;
-    let lp_position = next_account_info(account_info_iter)?;
-    let investor_shares = next_account_info(account_info_iter)?;
-    let share_mint = next_account_info(account_info_iter)?;
-    let token_program = next_account_info(account_info_iter)?;
-    
-    assert_signer(investor)?;
-    assert_owned_by(fund_account, program_id)?;
-    
-    if args.shares == 0 {
-        return Err(FundError::InvalidAmount.into());
-    }
-    
-    let mut fund = Fund::try_from_slice(&fund_account.data.borrow())?;
-    
-    if !fund.can_withdraw() {
-        return Err(FundError::FundPaused.into());
-    }
-    
-    let current_ts = get_current_timestamp()?;
-    
-    // Calculate redemption value
-    let redemption_value = calculate_redemption_value(args.shares, fund.stats.current_nav_e6)?;
-    
-    // Check fund has enough balance
-    let vault_account = spl_token::state::Account::unpack(&fund_vault.data.borrow())?;
-    if vault_account.amount < redemption_value as u64 {
-        return Err(FundError::InsufficientBalance.into());
-    }
-    
-    // Update LP position
-    let mut position = LPPosition::try_from_slice(&lp_position.data.borrow())?;
-    
-    if position.fund != *fund_account.key || position.investor != *investor.key {
-        return Err(FundError::LPPositionNotFound.into());
-    }
-    
-    if position.shares < args.shares {
-        return Err(FundError::InsufficientShares.into());
-    }
-    
-    position.remove_shares(args.shares, redemption_value, current_ts)?;
-    
-    // Burn share tokens (Share Token 使用 Token-v1)
-    invoke(
-        &spl_token::instruction::burn(
-            &spl_token::id(),
-            investor_shares.key,
-            share_mint.key,
-            investor.key,
-            &[],
-            args.shares,
-        )?,
-        &[investor_shares.clone(), share_mint.clone(), investor.clone(), token_program.clone()],
-    )?;
-    
-    // Transfer USDC to investor - 使用 token_compat 支持 Token-2022
-    let fund_seeds = Fund::seeds(&fund.manager, fund.fund_index);
-    let fund_seeds_refs: Vec<&[u8]> = fund_seeds.iter().map(|s| s.as_slice()).collect();
-    let (_, fund_bump) = Pubkey::find_program_address(&fund_seeds_refs, program_id);
-    
-    let signer_seeds: &[&[u8]] = &[FUND_SEED, fund.manager.as_ref(), &fund.fund_index.to_le_bytes(), &[fund_bump]];
-    token_compat::transfer(
-        token_program,
-        fund_vault,
-        investor_usdc,
-        fund_account,
-        redemption_value as u64,
-        Some(signer_seeds),
-    )?;
-    
-    // Check if position is empty
-    if position.is_empty() {
-        fund.stats.lp_count = fund.stats.lp_count.saturating_sub(1);
-    }
-    
-    position.serialize(&mut *lp_position.data.borrow_mut())?;
-    
-    // Update fund stats
-    fund.record_withdrawal(redemption_value, args.shares)?;
-    fund.last_update_ts = current_ts;
-    fund.serialize(&mut *fund_account.data.borrow_mut())?;
-    
-    msg!("Redeem from fund: {} shares", args.shares);
-    msg!("USDC received: {}", redemption_value);
-    msg!("Current NAV: {}", fund.stats.current_nav_e6);
-    
-    Ok(())
 }
 
 // =============================================================================
@@ -1760,62 +1526,14 @@ fn process_check_adl_trigger(
 /// 3. `[writable]` Vault Token Account (source of fees)
 /// 4. `[writable]` Insurance Fund Vault (destination)
 /// 5. `[]` Token Program
+/// [DEPRECATED] Trading fees are now recorded off-chain. Ledger CPI caller removed.
 fn process_add_trading_fee(
-    program_id: &Pubkey,
-    accounts: &[AccountInfo],
-    args: AddTradingFeeArgs,
+    _program_id: &Pubkey,
+    _accounts: &[AccountInfo],
+    _args: AddTradingFeeArgs,
 ) -> ProgramResult {
-    let account_info_iter = &mut accounts.iter();
-    
-    let caller = next_account_info(account_info_iter)?;
-    let fund_account = next_account_info(account_info_iter)?;
-    let insurance_config = next_account_info(account_info_iter)?;
-    let vault_token_account = next_account_info(account_info_iter)?;
-    let insurance_fund_vault = next_account_info(account_info_iter)?;
-    let token_program = next_account_info(account_info_iter)?;
-    
-    assert_owned_by(fund_account, program_id)?;
-    assert_owned_by(insurance_config, program_id)?;
-    
-    // Load and verify InsuranceFundConfig
-    let mut config = InsuranceFundConfig::try_from_slice(&insurance_config.data.borrow())?;
-    if config.discriminator != INSURANCE_FUND_CONFIG_DISCRIMINATOR {
-        return Err(FundError::InsuranceFundNotInitialized.into());
-    }
-    
-    // Verify caller is authorized (Ledger Program)
-    if !config.is_authorized_caller(caller.key) {
-        msg!("Unauthorized caller for AddTradingFee: {}", caller.key);
-        return Err(FundError::UnauthorizedCaller.into());
-    }
-    
-    // Validate fee amount
-    if args.fee_e6 <= 0 {
-        msg!("Invalid fee amount: {}", args.fee_e6);
-        return Err(FundError::InvalidAmount.into());
-    }
-    
-    // P1-3: 交易费纯记账（不做真实转账到 Insurance Fund Vault）
-    msg!("Trading fee {} recorded to insurance fund (pure accounting, no transfer)", args.fee_e6);
-    let _ = vault_token_account;
-    let _ = insurance_fund_vault;
-    let _ = token_program;
-    
-    // Update stats
-    config.add_trading_fee(args.fee_e6);
-    config.last_update_ts = get_current_timestamp()?;
-    config.serialize(&mut *insurance_config.data.borrow_mut())?;
-    
-    // Update Fund's realized PnL (fee income is positive PnL for the fund)
-    let mut fund = Fund::try_from_slice(&fund_account.data.borrow())?;
-    fund.record_pnl(args.fee_e6)?;
-    fund.last_update_ts = get_current_timestamp()?;
-    fund.serialize(&mut *fund_account.data.borrow_mut())?;
-    
-    msg!("TRADING_FEE_COLLECTED: fee_e6={}", args.fee_e6);
-    msg!("Total income now: {}", config.total_income_e6());
-    
-    Ok(())
+    msg!("ERROR: AddTradingFee is deprecated");
+    Err(ProgramError::InvalidInstructionData)
 }
 
 /// Redeem shares from Insurance Fund (with special rules)
@@ -4021,128 +3739,24 @@ fn process_initialize_spot_fee_config(
     Ok(())
 }
 
-/// 收取 Spot 交易手续费
-fn process_collect_spot_trading_fee(
-    _program_id: &Pubkey,
-    accounts: &[AccountInfo],
-    args: CollectSpotTradingFeeArgs,
-) -> ProgramResult {
-    let account_info_iter = &mut accounts.iter();
-    
-    let caller = next_account_info(account_info_iter)?;
-    let spot_fee_config_info = next_account_info(account_info_iter)?;
-    let _spot_fee_vault = next_account_info(account_info_iter)?;
-    let _source_token_account = next_account_info(account_info_iter)?;
-    let _token_program = next_account_info(account_info_iter)?;
-    
-    assert_signer(caller)?;
-    
-    let mut config = SpotTradingFeeConfig::try_from_slice(&spot_fee_config_info.data.borrow())?;
-    
-    if config.discriminator != SPOT_TRADING_FEE_CONFIG_DISCRIMINATOR {
-        return Err(FundError::FundNotInitialized.into());
-    }
-    
-    // Verify caller is authorized
-    if !config.is_authorized_caller(caller.key) {
-        msg!("❌ Unauthorized caller for SpotTradingFeeConfig");
-        return Err(FundError::UnauthorizedCaller.into());
-    }
-    
-    if config.is_paused {
-        return Err(FundError::FundPaused.into());
-    }
-    
-    // Calculate fee
-    let fee_e6 = if args.is_taker {
-        config.calculate_taker_fee(args.volume_e6)
-    } else {
-        config.calculate_maker_fee(args.volume_e6)
-    };
-    
-    // Record fee
-    let current_ts = Clock::get()?.unix_timestamp;
-    if args.is_taker {
-        config.record_taker_fee(fee_e6, current_ts);
-    } else {
-        config.record_maker_fee(fee_e6, current_ts);
-    }
-    
-    config.serialize(&mut *spot_fee_config_info.data.borrow_mut())?;
-    
-    msg!("✅ SpotTradingFee collected: volume={}, fee={}, is_taker={}", 
-         args.volume_e6, fee_e6, args.is_taker);
-    
-    Ok(())
-}
-
-/// 分配 Spot 手续费
+/// [DEPRECATED] Spot fee distribution is handled off-chain. No callers remain.
 fn process_distribute_spot_fee(
     _program_id: &Pubkey,
-    accounts: &[AccountInfo],
-    args: DistributeSpotFeeArgs,
+    _accounts: &[AccountInfo],
+    _args: DistributeSpotFeeArgs,
 ) -> ProgramResult {
-    let account_info_iter = &mut accounts.iter();
-    
-    let authority = next_account_info(account_info_iter)?;
-    let spot_fee_config_info = next_account_info(account_info_iter)?;
-    let _spot_fee_vault = next_account_info(account_info_iter)?;
-    let _insurance_fund_vault = next_account_info(account_info_iter)?;
-    let _token_program = next_account_info(account_info_iter)?;
-    
-    assert_signer(authority)?;
-    
-    let config = SpotTradingFeeConfig::try_from_slice(&spot_fee_config_info.data.borrow())?;
-    
-    if config.discriminator != SPOT_TRADING_FEE_CONFIG_DISCRIMINATOR {
-        return Err(FundError::FundNotInitialized.into());
-    }
-    
-    if config.authority != *authority.key {
-        return Err(FundError::AdminRequired.into());
-    }
-    
-    let (protocol, insurance, referral, maker) = config.distribute_fee(args.amount_e6);
-    
-    // 纯记账模式：分配计算已完成，PDA 统计字段由 config.distribute_fee 更新
-    // 实际的 maker 余额变动通过后端 settlement_sync 处理
-    msg!("✅ SpotFee distributed (pure accounting): total={}", args.amount_e6);
-    msg!("  Protocol: {} | Insurance: {} | Referral: {} | Maker: {}", protocol, insurance, referral, maker);
-    
-    Ok(())
+    msg!("ERROR: DistributeSpotFee is deprecated");
+    Err(ProgramError::InvalidInstructionData)
 }
 
-/// 发放 Spot 做市商奖励
+/// [DEPRECATED] Spot maker rewards are handled off-chain. No callers remain.
 fn process_distribute_spot_maker_reward(
     _program_id: &Pubkey,
-    accounts: &[AccountInfo],
-    args: DistributeSpotMakerRewardArgs,
+    _accounts: &[AccountInfo],
+    _args: DistributeSpotMakerRewardArgs,
 ) -> ProgramResult {
-    let account_info_iter = &mut accounts.iter();
-    
-    let authority = next_account_info(account_info_iter)?;
-    let spot_fee_config_info = next_account_info(account_info_iter)?;
-    let _spot_fee_vault = next_account_info(account_info_iter)?;
-    let _maker_token_account = next_account_info(account_info_iter)?;
-    let _token_program = next_account_info(account_info_iter)?;
-    
-    assert_signer(authority)?;
-    
-    let mut config = SpotTradingFeeConfig::try_from_slice(&spot_fee_config_info.data.borrow())?;
-    
-    if config.authority != *authority.key {
-        return Err(FundError::AdminRequired.into());
-    }
-    
-    let current_ts = Clock::get()?.unix_timestamp;
-    config.record_maker_reward(args.reward_e6, current_ts);
-    config.serialize(&mut *spot_fee_config_info.data.borrow_mut())?;
-    
-    msg!("✅ SpotMakerReward distributed: maker={}, amount={}", args.maker, args.reward_e6);
-    
-    // TODO: Implement actual token transfer
-    
-    Ok(())
+    msg!("ERROR: DistributeSpotMakerReward is deprecated");
+    Err(ProgramError::InvalidInstructionData)
 }
 
 /// 更新 Spot 手续费配置
@@ -4306,124 +3920,24 @@ fn process_initialize_perp_fee_config(
     Ok(())
 }
 
-/// 收取 Perp 交易手续费
-fn process_collect_perp_trading_fee(
-    _program_id: &Pubkey,
-    accounts: &[AccountInfo],
-    args: CollectPerpTradingFeeArgs,
-) -> ProgramResult {
-    let account_info_iter = &mut accounts.iter();
-    
-    let caller = next_account_info(account_info_iter)?;
-    let perp_fee_config_info = next_account_info(account_info_iter)?;
-    
-    assert_signer(caller)?;
-    
-    let mut config = PerpTradingFeeConfig::try_from_slice(&perp_fee_config_info.data.borrow())?;
-    
-    if config.discriminator != PERP_TRADING_FEE_CONFIG_DISCRIMINATOR {
-        return Err(FundError::FundNotInitialized.into());
-    }
-    
-    if !config.is_authorized_caller(caller.key) {
-        msg!("❌ Unauthorized caller for PerpTradingFeeConfig");
-        return Err(FundError::Unauthorized.into());
-    }
-    
-    if config.is_paused {
-        return Err(FundError::FundPaused.into());
-    }
-    
-    // Calculate fee
-    let fee = if args.is_taker {
-        config.calculate_taker_fee(args.volume_e6)
-    } else {
-        config.calculate_maker_fee(args.volume_e6)
-    };
-    
-    // Record fee
-    let current_ts = Clock::get()?.unix_timestamp;
-    if args.is_taker {
-        config.record_taker_fee(fee, current_ts);
-    } else {
-        config.record_maker_fee(fee, current_ts);
-    }
-    
-    config.serialize(&mut *perp_fee_config_info.data.borrow_mut())?;
-    
-    msg!("✅ PerpTradingFee collected: volume={}, fee={}, is_taker={}", 
-         args.volume_e6, fee, args.is_taker);
-    
-    Ok(())
-}
-
-/// 分配 Perp 手续费
+/// [DEPRECATED] Perp fee distribution is handled off-chain. No callers remain.
 fn process_distribute_perp_fee(
     _program_id: &Pubkey,
-    accounts: &[AccountInfo],
-    args: DistributePerpFeeArgs,
+    _accounts: &[AccountInfo],
+    _args: DistributePerpFeeArgs,
 ) -> ProgramResult {
-    let account_info_iter = &mut accounts.iter();
-    
-    let authority = next_account_info(account_info_iter)?;
-    let perp_fee_config_info = next_account_info(account_info_iter)?;
-    
-    assert_signer(authority)?;
-    
-    let config = PerpTradingFeeConfig::try_from_slice(&perp_fee_config_info.data.borrow())?;
-    
-    if config.discriminator != PERP_TRADING_FEE_CONFIG_DISCRIMINATOR {
-        return Err(FundError::FundNotInitialized.into());
-    }
-    
-    // Verify authority
-    if config.authority != *authority.key {
-        return Err(FundError::AdminRequired.into());
-    }
-    
-    // Calculate distribution
-    let (protocol, insurance, referral, maker) = config.distribute_fee(args.amount_e6);
-    
-    // 纯记账模式：分配计算已完成，PDA 统计字段由 config.distribute_fee 更新
-    // 实际的 maker 余额变动通过后端 settlement_sync 处理
-    msg!("✅ PerpFee distributed (pure accounting): total={}", args.amount_e6);
-    msg!("  Protocol: {} | Insurance: {} | Referral: {} | Maker: {}", protocol, insurance, referral, maker);
-    
-    Ok(())
+    msg!("ERROR: DistributePerpFee is deprecated");
+    Err(ProgramError::InvalidInstructionData)
 }
 
-/// 发放 Perp 做市商奖励
+/// [DEPRECATED] Perp maker rewards are handled off-chain. No callers remain.
 fn process_distribute_perp_maker_reward(
     _program_id: &Pubkey,
-    accounts: &[AccountInfo],
-    args: DistributePerpMakerRewardArgs,
+    _accounts: &[AccountInfo],
+    _args: DistributePerpMakerRewardArgs,
 ) -> ProgramResult {
-    let account_info_iter = &mut accounts.iter();
-    
-    let authority = next_account_info(account_info_iter)?;
-    let perp_fee_config_info = next_account_info(account_info_iter)?;
-    
-    assert_signer(authority)?;
-    
-    let mut config = PerpTradingFeeConfig::try_from_slice(&perp_fee_config_info.data.borrow())?;
-    
-    if config.discriminator != PERP_TRADING_FEE_CONFIG_DISCRIMINATOR {
-        return Err(FundError::FundNotInitialized.into());
-    }
-    
-    if config.authority != *authority.key {
-        return Err(FundError::AdminRequired.into());
-    }
-    
-    // Record reward
-    let current_ts = Clock::get()?.unix_timestamp;
-    config.record_maker_reward(args.reward_e6, current_ts);
-    
-    config.serialize(&mut *perp_fee_config_info.data.borrow_mut())?;
-    
-    msg!("✅ PerpMakerReward distributed: maker={}, reward={}", args.maker, args.reward_e6);
-    
-    Ok(())
+    msg!("ERROR: DistributePerpMakerReward is deprecated");
+    Err(ProgramError::InvalidInstructionData)
 }
 
 /// 更新 Perp 手续费配置
